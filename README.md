@@ -1,4 +1,4 @@
-# PubMed LLM Digest
+# PubMed Signal
 
 Daily, journal-aware discovery and ranking of new PubMed papers about LLMs, foundation models, and adjacent AI methods.
 
