@@ -1,0 +1,44 @@
+# Curated 25-journal whitelist for high-reputation PubMed journals
+# with meaningful likelihood of AI / LLM / digital medicine coverage.
+# Prefer exact full journal names when matching PubMed metadata.
+
+Nature
+Science
+Cell
+Nature medicine
+Nature biotechnology
+Nature methods
+Nature biomedical engineering
+Nature communications
+npj Digital Medicine
+The New England journal of medicine
+The Lancet
+JAMA
+The Lancet. Digital health
+Science translational medicine
+Proceedings of the National Academy of Sciences of the United States of America
+Cell reports. Medicine
+Med (New York, N.Y.)
+Journal of the American Medical Informatics Association : JAMIA
+Journal of medical Internet research
+Artificial intelligence in medicine
+The BMJ
+JAMA network open
+Radiology
+Radiology. Artificial intelligence
+Patterns (New York, N.Y.)
+Bioinformatics
+Briefings in bioinformatics
+PLoS computational biology
+Nucleic acids research
+Genome biology
+Nature reviews. Neuroscience
+Nature neuroscience
+Neuron
+Brain
+The Journal of neuroscience : the official journal of the Society for Neuroscience
+Computational linguistics
+Transactions of the Association for Computational Linguistics
+Natural language engineering
+Machine translation
+Journal of biomedical informatics

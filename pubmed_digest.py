@@ -59,6 +59,7 @@ OUTPUT_DIR = ROOT / "output"
 DB_PATH = DATA_DIR / "pubmed_digest.sqlite3"
 REQUEST_TIMEOUT = 60
 MAX_HTTP_RETRIES = 4
+DEFAULT_CANDIDATE_POOL_SIZE = 50
 
 
 @dataclass
@@ -75,6 +76,10 @@ class Paper:
     source: str
     pubmed_url: str
     pmc_url: str | None
+
+
+def normalize_journal_name(value: str) -> str:
+    return collapse_whitespace(value).casefold()
 
 
 def load_dotenv(dotenv_path: Path) -> None:
@@ -144,6 +149,33 @@ def ensure_dirs() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def daily_output_dir(now: dt.datetime | None = None) -> Path:
+    current = now or dt.datetime.now()
+    path = OUTPUT_DIR / current.strftime("%Y-%m-%d")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def load_journal_whitelist(path: Path) -> set[str]:
+    journals = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        journals.add(normalize_journal_name(line))
+    return journals
+
+
+def load_journal_whitelist_entries(path: Path) -> list[str]:
+    journals: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        journals.append(line)
+    return journals
+
+
 def init_db() -> sqlite3.Connection:
     ensure_dirs()
     conn = sqlite3.connect(DB_PATH)
@@ -172,6 +204,57 @@ def search_pubmed(query: str, days_back: int, retmax: int) -> list[str]:
     }
     payload = http_get_json("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi", params)
     return payload.get("esearchresult", {}).get("idlist", [])
+
+
+def build_whitelist_journal_query(journal_names: list[str]) -> str:
+    terms = [f'"{name}"[Journal]' for name in journal_names]
+    return "(" + " OR ".join(terms) + ")"
+
+
+def build_candidate_pmids(
+    conn: sqlite3.Connection,
+    query: str,
+    days_back: int,
+    candidate_pool_size: int,
+    journal_whitelist_path: Path | None,
+) -> tuple[list[str], dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+    collected: list[str] = []
+    seen_pmids = {row[0] for row in conn.execute("SELECT pmid FROM seen_papers")}
+
+    def add_stage(stage_name: str, stage_query: str, stage_retmax: int) -> None:
+        nonlocal collected
+        pmids = search_pubmed(stage_query, days_back, stage_retmax)
+        added = 0
+        for pmid in pmids:
+            if pmid in seen_pmids or pmid in collected:
+                continue
+            collected.append(pmid)
+            added += 1
+            if len(collected) >= candidate_pool_size:
+                break
+        stages.append(
+            {
+                "stage": stage_name,
+                "retmax": stage_retmax,
+                "query": stage_query,
+                "returned": len(pmids),
+                "added": added,
+                "pool_size_after_stage": len(collected),
+            }
+        )
+
+    stage_retmax = max(candidate_pool_size * 3, 100)
+    if journal_whitelist_path:
+        whitelist_entries = load_journal_whitelist_entries(journal_whitelist_path)
+        whitelist_query = build_whitelist_journal_query(whitelist_entries)
+        add_stage("journal_whitelist", f"({query}) AND {whitelist_query}", stage_retmax)
+        if len(collected) < candidate_pool_size:
+            add_stage("medline_fallback", f"({query}) AND MEDLINE[sb]", stage_retmax)
+    else:
+        add_stage("default", query, stage_retmax)
+
+    return collected[:candidate_pool_size], {"stages": stages, "candidate_pool_size": candidate_pool_size}
 
 
 def fetch_summaries(pmids: list[str]) -> dict[str, dict[str, Any]]:
@@ -296,20 +379,34 @@ def fetch_new_papers(
     days_back: int,
     retmax: int,
     full_text_limit: int,
-) -> list[Paper]:
-    pmids = search_pubmed(query, days_back, retmax)
+    journal_whitelist: set[str] | None = None,
+    journal_whitelist_path: Path | None = None,
+    candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
+) -> tuple[list[Paper], dict[str, Any]]:
+    pmids, search_metadata = build_candidate_pmids(
+        conn=conn,
+        query=query,
+        days_back=days_back,
+        candidate_pool_size=candidate_pool_size,
+        journal_whitelist_path=journal_whitelist_path,
+    )
     if not pmids:
-        return []
+        return [], search_metadata
 
-    seen = {
-        row[0]
-        for row in conn.execute("SELECT pmid FROM seen_papers WHERE pmid IN (%s)" % ",".join("?" for _ in pmids), pmids)
-    } if pmids else set()
-    new_pmids = [pmid for pmid in pmids if pmid not in seen]
-    summaries = fetch_summaries(new_pmids)
+    summaries = fetch_summaries(pmids)
+    if journal_whitelist:
+        filtered_pmids = []
+        for pmid in pmids:
+            summary = summaries.get(pmid)
+            if not summary:
+                continue
+            journal_name = normalize_journal_name(summary.get("fulljournalname", summary.get("source", "")))
+            if journal_name in journal_whitelist:
+                filtered_pmids.append(pmid)
+        pmids = filtered_pmids
 
     papers = []
-    for pmid in new_pmids:
+    for pmid in pmids[:retmax]:
         summary = summaries.get(pmid)
         if not summary:
             continue
@@ -318,7 +415,8 @@ def fetch_new_papers(
             time.sleep(0.34)
         except (urllib.error.URLError, ET.ParseError) as exc:
             print(f"warning: failed to fetch PMID {pmid}: {exc}", file=sys.stderr)
-    return papers
+    search_metadata["papers_fetched"] = len(papers)
+    return papers, search_metadata
 
 
 def extract_response_text(payload: dict[str, Any]) -> str:
@@ -459,17 +557,26 @@ def analyze_papers(papers: list[Paper], api_key: str | None, model: str) -> list
     return results
 
 
-def write_outputs(records: list[dict[str, Any]], query: str, days_back: int) -> tuple[Path, Path]:
-    timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    markdown_path = OUTPUT_DIR / f"pubmed-digest-{timestamp}.md"
-    json_path = OUTPUT_DIR / f"pubmed-digest-{timestamp}.json"
+def write_outputs(
+    records: list[dict[str, Any]],
+    query: str,
+    days_back: int,
+    journal_whitelist_path: str | None = None,
+    search_metadata: dict[str, Any] | None = None,
+) -> tuple[Path, Path]:
+    now = dt.datetime.now()
+    run_dir = daily_output_dir(now)
+    markdown_path = run_dir / "digest.md"
+    json_path = run_dir / "digest.json"
 
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(
             {
-                "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "generated_at": now.astimezone(dt.timezone.utc).isoformat(),
                 "days_back": days_back,
                 "query": query,
+                "journal_whitelist_path": journal_whitelist_path,
+                "search_metadata": search_metadata,
                 "records": records,
             },
             handle,
@@ -481,6 +588,8 @@ def write_outputs(records: list[dict[str, Any]], query: str, days_back: int) -> 
         "",
         f"- Query window: last {days_back} day(s)",
         f"- Papers found: {len(records)}",
+        f"- Journal whitelist: {journal_whitelist_path}" if journal_whitelist_path else "- Journal whitelist: none",
+        f"- Candidate pool target: {search_metadata.get('candidate_pool_size')}" if search_metadata else "- Candidate pool target: n/a",
         "",
         "## Recommended Reading",
         "",
@@ -571,6 +680,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenAI model for scoring.")
     parser.add_argument(
+        "--candidate-pool-size",
+        type=int,
+        default=DEFAULT_CANDIDATE_POOL_SIZE,
+        help="Build up to this many candidate papers before ranking them.",
+    )
+    parser.add_argument(
+        "--journal-whitelist",
+        help="Path to a newline-delimited journal whitelist file.",
+    )
+    parser.add_argument(
         "--mark-seen-without-scoring",
         action="store_true",
         help="Persist seen PMIDs even when OPENAI_API_KEY is missing.",
@@ -587,12 +706,17 @@ def main() -> int:
     load_dotenv(ROOT / ".env")
     args = parse_args()
     conn = init_db()
-    papers = fetch_new_papers(
+    journal_whitelist_path = Path(args.journal_whitelist).expanduser() if args.journal_whitelist else None
+    journal_whitelist = load_journal_whitelist(journal_whitelist_path) if journal_whitelist_path else None
+    papers, search_metadata = fetch_new_papers(
         conn=conn,
         query=args.query,
         days_back=args.days_back,
         retmax=args.retmax,
         full_text_limit=args.full_text_char_limit,
+        journal_whitelist=journal_whitelist,
+        journal_whitelist_path=journal_whitelist_path,
+        candidate_pool_size=args.candidate_pool_size,
     )
     if not papers:
         print("No new matching PubMed papers found.")
@@ -600,7 +724,13 @@ def main() -> int:
 
     api_key = os.getenv("OPENAI_API_KEY")
     records = analyze_papers(papers, api_key=api_key, model=args.model)
-    markdown_path, json_path = write_outputs(records, query=args.query, days_back=args.days_back)
+    markdown_path, json_path = write_outputs(
+        records,
+        query=args.query,
+        days_back=args.days_back,
+        journal_whitelist_path=str(journal_whitelist_path) if journal_whitelist_path else None,
+        search_metadata=search_metadata,
+    )
 
     if args.mark_seen_on_error:
         now = dt.datetime.now(dt.timezone.utc).isoformat()
