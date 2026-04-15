@@ -34,7 +34,7 @@ This project builds a candidate pool from reputable journals, expands to `MEDLIN
 Create a local `.env` file:
 
 ```bash
-cat > /Users/liux17/codex/pubmed/.env <<'EOF'
+cat > .env <<'EOF'
 OPENAI_API_KEY="your-openai-key"
 NCBI_API_KEY="your-ncbi-key"
 NCBI_EMAIL="you@example.com"
@@ -44,10 +44,10 @@ EOF
 Then run the daily workflow:
 
 ```bash
-/Users/liux17/codex/pubmed/run_daily.sh
+./run_daily.sh
 ```
 
-The scripts automatically load `/Users/liux17/codex/pubmed/.env`. That file is ignored by git.
+The scripts automatically load `.env` from the repository root. That file is ignored by git.
 
 ## How It Works
 
@@ -67,25 +67,23 @@ The scripts automatically load `/Users/liux17/codex/pubmed/.env`. That file is i
 Run the full workflow:
 
 ```bash
-/Users/liux17/codex/pubmed/run_daily.sh
+./run_daily.sh
 ```
 
 Run the main digest only:
 
 ```bash
-cd /Users/liux17/codex/pubmed
-/Users/liux17/miniforge/envs/pandas/bin/python pubmed_digest.py \
+python pubmed_digest.py \
   --days-back 365 \
   --candidate-pool-size 100 \
   --retmax 10 \
-  --journal-whitelist /Users/liux17/codex/pubmed/journal_whitelist_top40.txt
+  --journal-whitelist journal_whitelist_top40.txt
 ```
 
 Run editor's picks only:
 
 ```bash
-cd /Users/liux17/codex/pubmed
-/Users/liux17/miniforge/envs/pandas/bin/python editor_picks_from_pool.py
+python editor_picks_from_pool.py
 ```
 
 ## Important Flags
@@ -117,7 +115,7 @@ The JSON files are useful for automation, Slack/email formatting, or downstream 
 Example cron entry:
 
 ```cron
-0 7 * * * cd /Users/liux17/codex/pubmed && /Users/liux17/codex/pubmed/run_daily.sh >> /Users/liux17/codex/pubmed/output/cron.log 2>&1
+0 7 * * * cd /path/to/pubmed && ./run_daily.sh >> output/cron.log 2>&1
 ```
 
 That runs every day at 7:00 AM in the machine's local time zone.

@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-ROOT="/Users/liux17/codex/pubmed"
-PYTHON="/Users/liux17/miniforge/envs/pandas/bin/python"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${PYTHON:-python}"
 WHITELIST="$ROOT/journal_whitelist_top40.txt"
 
 cd "$ROOT"

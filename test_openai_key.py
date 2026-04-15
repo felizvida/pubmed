@@ -22,7 +22,7 @@ def load_dotenv(path: Path) -> None:
 
 
 def main() -> int:
-    load_dotenv(Path("/Users/liux17/codex/pubmed/.env"))
+    load_dotenv(Path(__file__).resolve().parent / ".env")
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     try:
         response = client.responses.create(
