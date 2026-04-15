@@ -9,7 +9,7 @@ cd "$ROOT"
 
 "$PYTHON" "$ROOT/pubmed_digest.py" \
   --days-back 365 \
-  --candidate-pool-size 50 \
+  --candidate-pool-size 100 \
   --retmax 10 \
   --journal-whitelist "$WHITELIST"
 

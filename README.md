@@ -1,13 +1,17 @@
 # PubMed Signal
 
-Daily, journal-aware discovery and ranking of new PubMed papers about LLMs, foundation models, and adjacent AI methods.
+![PubMed Signal banner](assets/banner.svg)
 
-This project builds a candidate pool from reputable journals, expands to `MEDLINE[sb]` only if needed, reads abstracts or PMC full text, and produces a polished daily reading list plus editor's picks.
+Daily, journal-aware discovery and ranking of new PubMed and arXiv papers about LLMs, foundation models, and adjacent AI methods.
+
+This project builds a candidate pool from reputable journals, expands to `MEDLINE[sb]` only if needed, then reaches into the arXiv computer science archive if the pool is still short. It reads abstracts or PMC full text and produces a polished daily reading list plus editor's picks.
+
+> A tasteful daily radar for serious AI literature scanning.
 
 ## Highlights
 
 - Finds newly added PubMed papers using the article `edat` window.
-- Uses a curated `top40` journal whitelist first, then falls back to `MEDLINE[sb]` to fill a target candidate pool.
+- Uses a curated `top40` journal whitelist first, then falls back to `MEDLINE[sb]`, then arXiv `cs`, to fill a target candidate pool.
 - Scores papers with OpenAI across relevance, impact, rigor, interestingness, `awe_factor`, and `surprise_factor`.
 - Produces editor's picks for:
   - theoretical contribution
@@ -50,9 +54,10 @@ The scripts automatically load `/Users/liux17/codex/pubmed/.env`. That file is i
 1. Search PubMed for recent LLM-related papers.
 2. Fill a candidate pool from the journal whitelist first.
 3. If the pool is still too small, search `MEDLINE[sb]` as a fallback.
-4. Fetch summaries, abstracts, and PMC full text when available.
-5. Rank candidates with OpenAI.
-6. Write:
+4. If the pool is still too small, add arXiv `cs` candidates.
+5. Fetch summaries, abstracts, and PMC full text when available.
+6. Rank candidates with OpenAI.
+7. Write:
    - a full digest
    - a machine-readable JSON export
    - a separate editor's picks summary
@@ -71,7 +76,7 @@ Run the main digest only:
 cd /Users/liux17/codex/pubmed
 /Users/liux17/miniforge/envs/pandas/bin/python pubmed_digest.py \
   --days-back 365 \
-  --candidate-pool-size 50 \
+  --candidate-pool-size 100 \
   --retmax 10 \
   --journal-whitelist /Users/liux17/codex/pubmed/journal_whitelist_top40.txt
 ```

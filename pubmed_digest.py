@@ -64,7 +64,9 @@ DEFAULT_CANDIDATE_POOL_SIZE = 50
 
 @dataclass
 class Paper:
-    pmid: str
+    paper_id: str
+    source_db: str
+    seen_key: str
     title: str
     authors: list[str]
     journal: str
@@ -74,7 +76,8 @@ class Paper:
     abstract: str
     full_text: str
     source: str
-    pubmed_url: str
+    entry_url: str
+    link_label: str
     pmc_url: str | None
 
 
@@ -109,6 +112,12 @@ def http_get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
 def http_get_text(url: str, params: dict[str, Any]) -> str:
     query = urllib.parse.urlencode(params)
     request = urllib.request.Request(f"{url}?{query}", headers={"User-Agent": "pubmed-digest/0.1"})
+    with open_with_retry(request) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def http_get_text_absolute(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "pubmed-digest/0.1"})
     with open_with_retry(request) as response:
         return response.read().decode("utf-8", errors="replace")
 
@@ -206,6 +215,80 @@ def search_pubmed(query: str, days_back: int, retmax: int) -> list[str]:
     return payload.get("esearchresult", {}).get("idlist", [])
 
 
+def build_arxiv_query() -> str:
+    terms = [
+        'all:"large language model"',
+        'all:"large language models"',
+        'all:LLM',
+        'all:"foundation model"',
+        'all:"foundation models"',
+        'all:"generative AI"',
+        'all:"generative artificial intelligence"',
+        'all:"retrieval augmented generation"',
+        'all:RAG',
+        'all:GPT-4',
+        'all:GPT-4o',
+        'all:GPT-5',
+    ]
+    return "(cat:cs.*) AND (" + " OR ".join(terms) + ")"
+
+
+def search_arxiv_cs(days_back: int, retmax: int) -> list[dict[str, Any]]:
+    params = {
+        "search_query": build_arxiv_query(),
+        "start": "0",
+        "max_results": str(retmax),
+        "sortBy": "submittedDate",
+        "sortOrder": "descending",
+    }
+    feed = http_get_text_absolute("https://export.arxiv.org/api/query?" + urllib.parse.urlencode(params))
+    root = ET.fromstring(feed)
+    ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days_back)
+    entries: list[dict[str, Any]] = []
+    for entry in root.findall("atom:entry", ns):
+        entry_id = collapse_whitespace(entry.findtext("atom:id", default="", namespaces=ns))
+        if not entry_id:
+            continue
+        published_raw = collapse_whitespace(entry.findtext("atom:published", default="", namespaces=ns))
+        try:
+            published_dt = dt.datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
+        except ValueError:
+            published_dt = None
+        if published_dt and published_dt < cutoff:
+            continue
+        links = entry.findall("atom:link", ns)
+        pdf_url = None
+        for link in links:
+            if link.attrib.get("title") == "pdf":
+                pdf_url = link.attrib.get("href")
+                break
+        authors = [
+            collapse_whitespace(author.findtext("atom:name", default="", namespaces=ns))
+            for author in entry.findall("atom:author", ns)
+            if collapse_whitespace(author.findtext("atom:name", default="", namespaces=ns))
+        ]
+        primary_category = entry.find("arxiv:primary_category", ns)
+        entries.append(
+            {
+                "paper_id": entry_id.rsplit("/", 1)[-1],
+                "entry_url": entry_id,
+                "title": collapse_whitespace(entry.findtext("atom:title", default="", namespaces=ns)),
+                "abstract": collapse_whitespace(entry.findtext("atom:summary", default="", namespaces=ns)),
+                "authors": authors,
+                "pubdate": published_raw[:10] if published_raw else "",
+                "journal": primary_category.attrib.get("term", "arXiv cs") if primary_category is not None else "arXiv cs",
+                "doi": collapse_whitespace(entry.findtext("arxiv:doi", default="", namespaces=ns)) or None,
+                "pdf_url": pdf_url,
+            }
+        )
+    return entries
+
+
+def fetch_arxiv_entry_map(days_back: int, retmax: int) -> dict[str, dict[str, Any]]:
+    return {entry["paper_id"]: entry for entry in search_arxiv_cs(days_back, retmax)}
+
+
 def build_whitelist_journal_query(journal_names: list[str]) -> str:
     terms = [f'"{name}"[Journal]' for name in journal_names]
     return "(" + " OR ".join(terms) + ")"
@@ -222,23 +305,49 @@ def build_candidate_pmids(
     collected: list[str] = []
     seen_pmids = {row[0] for row in conn.execute("SELECT pmid FROM seen_papers")}
 
-    def add_stage(stage_name: str, stage_query: str, stage_retmax: int) -> None:
+    def add_pubmed_stage(stage_name: str, stage_query: str, stage_retmax: int) -> None:
         nonlocal collected
         pmids = search_pubmed(stage_query, days_back, stage_retmax)
         added = 0
         for pmid in pmids:
-            if pmid in seen_pmids or pmid in collected:
+            seen_key = f"pubmed:{pmid}"
+            if seen_key in seen_pmids or seen_key in collected:
                 continue
-            collected.append(pmid)
+            collected.append(seen_key)
             added += 1
             if len(collected) >= candidate_pool_size:
                 break
         stages.append(
             {
                 "stage": stage_name,
+                "source": "pubmed",
                 "retmax": stage_retmax,
                 "query": stage_query,
                 "returned": len(pmids),
+                "added": added,
+                "pool_size_after_stage": len(collected),
+            }
+        )
+
+    def add_arxiv_stage(stage_name: str, stage_retmax: int) -> None:
+        nonlocal collected
+        entries = search_arxiv_cs(days_back, stage_retmax)
+        added = 0
+        for entry in entries:
+            seen_key = f"arxiv:{entry['paper_id']}"
+            if seen_key in seen_pmids or seen_key in collected:
+                continue
+            collected.append(seen_key)
+            added += 1
+            if len(collected) >= candidate_pool_size:
+                break
+        stages.append(
+            {
+                "stage": stage_name,
+                "source": "arxiv",
+                "retmax": stage_retmax,
+                "query": build_arxiv_query(),
+                "returned": len(entries),
                 "added": added,
                 "pool_size_after_stage": len(collected),
             }
@@ -248,11 +357,13 @@ def build_candidate_pmids(
     if journal_whitelist_path:
         whitelist_entries = load_journal_whitelist_entries(journal_whitelist_path)
         whitelist_query = build_whitelist_journal_query(whitelist_entries)
-        add_stage("journal_whitelist", f"({query}) AND {whitelist_query}", stage_retmax)
+        add_pubmed_stage("journal_whitelist", f"({query}) AND {whitelist_query}", stage_retmax)
         if len(collected) < candidate_pool_size:
-            add_stage("medline_fallback", f"({query}) AND MEDLINE[sb]", stage_retmax)
+            add_pubmed_stage("medline_fallback", f"({query}) AND MEDLINE[sb]", stage_retmax)
     else:
-        add_stage("default", query, stage_retmax)
+        add_pubmed_stage("default", query, stage_retmax)
+    if len(collected) < candidate_pool_size:
+        add_arxiv_stage("arxiv_cs_fallback", stage_retmax)
 
     return collected[:candidate_pool_size], {"stages": stages, "candidate_pool_size": candidate_pool_size}
 
@@ -358,7 +469,9 @@ def paper_from_summary(pmid: str, summary: dict[str, Any], full_text_limit: int)
 
     authors = [author.get("name", "").strip() for author in summary.get("authors", []) if author.get("name")]
     return Paper(
-        pmid=pmid,
+        paper_id=pmid,
+        source_db="pubmed",
+        seen_key=f"pubmed:{pmid}",
         title=collapse_whitespace(summary.get("title", "")),
         authors=authors,
         journal=collapse_whitespace(summary.get("fulljournalname", summary.get("source", ""))),
@@ -368,8 +481,29 @@ def paper_from_summary(pmid: str, summary: dict[str, Any], full_text_limit: int)
         abstract=abstract,
         full_text=full_text,
         source=source,
-        pubmed_url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+        entry_url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+        link_label="PubMed",
         pmc_url=pmc_url,
+    )
+
+
+def paper_from_arxiv_entry(entry: dict[str, Any]) -> Paper:
+    return Paper(
+        paper_id=entry["paper_id"],
+        source_db="arxiv",
+        seen_key=f"arxiv:{entry['paper_id']}",
+        title=entry["title"],
+        authors=entry["authors"],
+        journal=entry["journal"],
+        pubdate=entry["pubdate"],
+        doi=entry.get("doi"),
+        pmcid=None,
+        abstract=entry["abstract"],
+        full_text="",
+        source="abstract_only",
+        entry_url=entry["entry_url"],
+        link_label="arXiv",
+        pmc_url=entry.get("pdf_url"),
     )
 
 
@@ -383,38 +517,52 @@ def fetch_new_papers(
     journal_whitelist_path: Path | None = None,
     candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
 ) -> tuple[list[Paper], dict[str, Any]]:
-    pmids, search_metadata = build_candidate_pmids(
+    candidate_ids, search_metadata = build_candidate_pmids(
         conn=conn,
         query=query,
         days_back=days_back,
         candidate_pool_size=candidate_pool_size,
         journal_whitelist_path=journal_whitelist_path,
     )
-    if not pmids:
+    if not candidate_ids:
         return [], search_metadata
 
-    summaries = fetch_summaries(pmids)
+    pubmed_pmids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("pubmed:")]
+    arxiv_ids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("arxiv:")]
+    summaries = fetch_summaries(pubmed_pmids)
+    arxiv_entries = fetch_arxiv_entry_map(days_back, max(candidate_pool_size * 3, 100))
     if journal_whitelist:
-        filtered_pmids = []
-        for pmid in pmids:
+        filtered_candidates = []
+        for candidate_id in candidate_ids:
+            if candidate_id.startswith("pubmed:"):
+                pmid = candidate_id.split(":", 1)[1]
+                summary = summaries.get(pmid)
+                if not summary:
+                    continue
+                journal_name = normalize_journal_name(summary.get("fulljournalname", summary.get("source", "")))
+                if journal_name in journal_whitelist:
+                    filtered_candidates.append(candidate_id)
+            else:
+                filtered_candidates.append(candidate_id)
+        candidate_ids = filtered_candidates
+
+    papers = []
+    for candidate_id in candidate_ids[:retmax]:
+        if candidate_id.startswith("pubmed:"):
+            pmid = candidate_id.split(":", 1)[1]
             summary = summaries.get(pmid)
             if not summary:
                 continue
-            journal_name = normalize_journal_name(summary.get("fulljournalname", summary.get("source", "")))
-            if journal_name in journal_whitelist:
-                filtered_pmids.append(pmid)
-        pmids = filtered_pmids
-
-    papers = []
-    for pmid in pmids[:retmax]:
-        summary = summaries.get(pmid)
-        if not summary:
-            continue
-        try:
-            papers.append(paper_from_summary(pmid, summary, full_text_limit))
-            time.sleep(0.34)
-        except (urllib.error.URLError, ET.ParseError) as exc:
-            print(f"warning: failed to fetch PMID {pmid}: {exc}", file=sys.stderr)
+            try:
+                papers.append(paper_from_summary(pmid, summary, full_text_limit))
+                time.sleep(0.34)
+            except (urllib.error.URLError, ET.ParseError) as exc:
+                print(f"warning: failed to fetch PMID {pmid}: {exc}", file=sys.stderr)
+        else:
+            arxiv_id = candidate_id.split(":", 1)[1]
+            entry = arxiv_entries.get(arxiv_id)
+            if entry:
+                papers.append(paper_from_arxiv_entry(entry))
     search_metadata["papers_fetched"] = len(papers)
     return papers, search_metadata
 
@@ -464,10 +612,11 @@ def build_analysis_prompt(paper: Paper) -> str:
     authors = ", ".join(paper.authors[:12]) if paper.authors else "Unknown"
     return textwrap.dedent(
         f"""
-        Evaluate this newly indexed PubMed paper for an LLM reading digest.
+        Evaluate this newly discovered research paper for an LLM reading digest.
 
         Title: {paper.title}
-        PMID: {paper.pmid}
+        Source database: {paper.source_db}
+        Identifier: {paper.paper_id}
         Journal: {paper.journal}
         Publication date: {paper.pubdate}
         Authors: {authors}
@@ -612,11 +761,13 @@ def write_outputs(
                 f"- Journal: {paper['journal']}",
                 f"- Date: {paper['pubdate']}",
                 f"- Authors: {authors}",
-                f"- PMID: [{paper['pmid']}]({paper['pubmed_url']})",
+                f"- Source: {paper['source_db']}",
+                f"- {paper['link_label']}: [{paper['paper_id']}]({paper['entry_url']})",
             ]
         )
         if paper.get("pmc_url"):
-            lines.append(f"- Full text: [PMC]({paper['pmc_url']})")
+            full_text_label = "PDF" if paper["source_db"] == "arxiv" else "PMC"
+            lines.append(f"- Full text: [{full_text_label}]({paper['pmc_url']})")
         if paper.get("doi"):
             lines.append(f"- DOI: {paper['doi']}")
         lines.extend(
@@ -646,7 +797,7 @@ def write_outputs(
 def mark_seen(conn: sqlite3.Connection, records: list[dict[str, Any]], digest_path: Path) -> None:
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     rows = [
-        (record["paper"]["pmid"], now, str(digest_path))
+        (record["paper"]["seen_key"], now, str(digest_path))
         for record in records
         if not record["analysis"].get("error")
     ]
@@ -734,7 +885,7 @@ def main() -> int:
 
     if args.mark_seen_on_error:
         now = dt.datetime.now(dt.timezone.utc).isoformat()
-        rows = [(record["paper"]["pmid"], now, str(markdown_path)) for record in records]
+        rows = [(record["paper"]["seen_key"], now, str(markdown_path)) for record in records]
         conn.executemany(
             """
             INSERT INTO seen_papers (pmid, first_seen_at, last_digest_path)

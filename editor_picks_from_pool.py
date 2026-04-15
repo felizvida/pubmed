@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import textwrap
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from pubmed_digest import (
     daily_output_dir,
     extract_json_object,
     extract_response_text,
+    fetch_arxiv_entry_map,
     fetch_pubmed_article_xml,
     fetch_summaries,
     init_db,
@@ -50,60 +50,84 @@ def main() -> int:
         """
     ).strip()
 
-    pmids, metadata = build_candidate_pmids(
+    candidate_ids, metadata = build_candidate_pmids(
         conn=conn,
         query=query,
         days_back=365,
-        candidate_pool_size=50,
+        candidate_pool_size=100,
         journal_whitelist_path=WHITELIST,
     )
-    summaries = fetch_summaries(pmids)
+    pubmed_ids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("pubmed:")]
+    summaries = fetch_summaries(pubmed_ids)
+    arxiv_entries = fetch_arxiv_entry_map(days_back=365, retmax=300)
 
     pool = []
-    for pmid in pmids:
-        summary = summaries.get(pmid)
-        if not summary:
-            continue
-        journal = summary.get("fulljournalname", summary.get("source", "")).strip()
-        title = summary.get("title", "").strip()
-        pubdate = summary.get("pubdate", "").strip()
-        authors = [author.get("name", "").strip() for author in summary.get("authors", []) if author.get("name")]
-        try:
-            abstract = parse_abstract(fetch_pubmed_article_xml(pmid))
-        except Exception:
-            abstract = ""
-        pool.append(
-            {
-                "pmid": pmid,
-                "title": title,
-                "journal": journal,
-                "pubdate": pubdate,
-                "authors": authors[:6],
-                "abstract": abstract[:2000],
-                "pubmed_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            }
-        )
+    for candidate_id in candidate_ids:
+        if candidate_id.startswith("pubmed:"):
+            pmid = candidate_id.split(":", 1)[1]
+            summary = summaries.get(pmid)
+            if not summary:
+                continue
+            journal = summary.get("fulljournalname", summary.get("source", "")).strip()
+            title = summary.get("title", "").strip()
+            pubdate = summary.get("pubdate", "").strip()
+            authors = [author.get("name", "").strip() for author in summary.get("authors", []) if author.get("name")]
+            try:
+                abstract = parse_abstract(fetch_pubmed_article_xml(pmid))
+            except Exception:
+                abstract = ""
+            pool.append(
+                {
+                    "paper_id": pmid,
+                    "source_db": "pubmed",
+                    "title": title,
+                    "journal": journal,
+                    "pubdate": pubdate,
+                    "authors": authors[:6],
+                    "abstract": abstract[:2000],
+                    "entry_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                    "link_label": "PubMed",
+                }
+            )
+        else:
+            arxiv_id = candidate_id.split(":", 1)[1]
+            entry = arxiv_entries.get(arxiv_id)
+            if not entry:
+                continue
+            pool.append(
+                {
+                    "paper_id": arxiv_id,
+                    "source_db": "arxiv",
+                    "title": entry["title"],
+                    "journal": entry["journal"],
+                    "pubdate": entry["pubdate"],
+                    "authors": entry["authors"][:6],
+                    "abstract": entry["abstract"][:2000],
+                    "entry_url": entry["entry_url"],
+                    "link_label": "arXiv",
+                }
+            )
 
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     instructions = textwrap.dedent(
         """
-        You are selecting three editor's picks from a candidate pool of LLM-related PubMed papers.
+        You are selecting three editor's picks from a candidate pool of LLM-related research papers.
         Return exactly one JSON object and no markdown.
 
         Required schema:
         {
           "best_theoretical": {
-            "pmid": "string",
+            "paper_id": "string",
             "title": "string",
             "reason": "string"
           },
           "best_application": {
-            "pmid": "string",
+            "paper_id": "string",
             "title": "string",
             "reason": "string"
           },
           "most_fun": {
-            "pmid": "string",
+            "paper_id": "string",
             "title": "string",
             "reason": "string"
           }
@@ -130,7 +154,7 @@ def main() -> int:
     payload = {"search_metadata": metadata, "pool": pool, "picks": picks}
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    lookup = {item["pmid"]: item for item in pool}
+    lookup = {item["paper_id"]: item for item in pool}
     lines = [
         "# Editor's Picks",
         "",
@@ -144,15 +168,17 @@ def main() -> int:
     ]
     for heading, key in sections:
         pick = picks[key]
-        paper = lookup.get(pick["pmid"], {})
-        pubmed_url = paper.get("pubmed_url", f"https://pubmed.ncbi.nlm.nih.gov/{pick['pmid']}/")
+        paper = lookup.get(pick["paper_id"], {})
+        entry_url = paper.get("entry_url", "")
+        link_label = paper.get("link_label", "Link")
         lines.extend(
             [
                 f"## {heading}",
                 "",
                 f"**{pick['title']}**",
                 "",
-                f"- PMID: [{pick['pmid']}]({pubmed_url})",
+                f"- Source: {paper.get('source_db', 'unknown')}",
+                f"- {link_label}: [{pick['paper_id']}]({entry_url})" if entry_url else f"- Identifier: {pick['paper_id']}",
                 f"- Journal: {paper.get('journal', 'Unknown')}",
                 f"- Date: {paper.get('pubdate', 'Unknown')}",
                 "",
