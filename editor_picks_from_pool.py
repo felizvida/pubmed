@@ -25,13 +25,14 @@ from pubmed_digest import (
     paper_from_summary,
     parse_abstract,
     resolve_query,
+    resolve_model_selection,
     text_matches_topic,
 )
 
 
 ROOT = Path(__file__).resolve().parent
 WHITELIST = ROOT / "journal_whitelist_top40.txt"
-FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL", "gpt-5.4")
+FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL")
 
 
 def main() -> int:
@@ -138,6 +139,11 @@ def main() -> int:
     if filtered_pool:
         pool = filtered_pool
 
+    _, final_model = resolve_model_selection(
+        api_key=os.environ["OPENAI_API_KEY"],
+        scoring_model=None,
+        final_model=FINAL_MODEL,
+    )
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     instructions = textwrap.dedent(
         """
@@ -174,7 +180,7 @@ def main() -> int:
     ).replace("TOPIC_LABEL", topic_label).strip()
     prompt = "Candidate pool:\n" + json.dumps({"search_metadata": metadata, "papers": pool}, ensure_ascii=True)
     response = client.responses.create(
-        model=FINAL_MODEL,
+        model=final_model,
         reasoning={"effort": "medium"},
         instructions=instructions,
         input=prompt,

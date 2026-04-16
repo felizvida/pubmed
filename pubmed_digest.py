@@ -134,8 +134,8 @@ TOPIC_PRESETS: dict[str, str] = {
 
 DEFAULT_QUERY = TOPIC_PRESETS["llm"]
 
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
-DEFAULT_FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL", "gpt-5.4")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL")
+DEFAULT_FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL")
 DEFAULT_DAYS_BACK = int(os.getenv("PUBMED_DAYS_BACK", "3"))
 MEDLINE_STAGE_TARGET = 50
 BIORXIV_STAGE_TARGET = 80
@@ -146,6 +146,8 @@ DB_PATH = DATA_DIR / "pubmed_digest.sqlite3"
 REQUEST_TIMEOUT = 60
 MAX_HTTP_RETRIES = 4
 DEFAULT_CANDIDATE_POOL_SIZE = 50
+DEFAULT_SCORING_MODEL_PREFERENCES = ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4"]
+DEFAULT_FINAL_MODEL_PREFERENCES = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]
 
 
 @dataclass
@@ -258,6 +260,48 @@ def display_path(path: Path | None) -> str | None:
         return str(path.resolve().relative_to(ROOT))
     except ValueError:
         return str(path)
+
+
+def list_available_openai_models(api_key: str | None) -> set[str]:
+    if not api_key:
+        return set()
+    client = OpenAI(api_key=api_key)
+    try:
+        response = client.models.list()
+    except Exception:
+        return set()
+    return {model.id for model in getattr(response, "data", []) if getattr(model, "id", None)}
+
+
+def choose_preferred_model(available: set[str], preferred: list[str], fallback: str) -> str:
+    for candidate in preferred:
+        if candidate in available:
+            return candidate
+    return fallback
+
+
+def resolve_model_selection(
+    api_key: str | None,
+    scoring_model: str | None,
+    final_model: str | None,
+) -> tuple[str, str]:
+    scoring_override = scoring_model or os.getenv("OPENAI_MODEL")
+    final_override = final_model or os.getenv("OPENAI_FINAL_MODEL")
+    if scoring_override and final_override:
+        return scoring_override, final_override
+
+    available_models = list_available_openai_models(api_key)
+    resolved_final = final_override or choose_preferred_model(
+        available_models,
+        DEFAULT_FINAL_MODEL_PREFERENCES,
+        "gpt-5.4",
+    )
+    resolved_scoring = scoring_override or choose_preferred_model(
+        available_models,
+        DEFAULT_SCORING_MODEL_PREFERENCES,
+        "gpt-5.4-mini",
+    )
+    return resolved_scoring, resolved_final
 
 
 def available_topics() -> list[str]:
@@ -1322,8 +1366,16 @@ def parse_args() -> argparse.Namespace:
         default=120000,
         help="Maximum number of full-text characters to send to the LLM.",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenAI model for first-pass scoring.")
-    parser.add_argument("--final-model", default=DEFAULT_FINAL_MODEL, help="Stronger OpenAI model for final ranking.")
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="OpenAI model for first-pass scoring. If unset, the script queries available models and prefers gpt-5.4-mini.",
+    )
+    parser.add_argument(
+        "--final-model",
+        default=DEFAULT_FINAL_MODEL,
+        help="OpenAI model for final ranking. If unset, the script queries available models and prefers gpt-5.4.",
+    )
     parser.add_argument(
         "--candidate-pool-size",
         type=int,
@@ -1375,8 +1427,13 @@ def main() -> int:
         return 0
 
     api_key = os.getenv("OPENAI_API_KEY")
-    records = analyze_papers(papers, api_key=api_key, model=args.model, topic_label=topic_label)
-    final_records = rerank_records(records, api_key=api_key, model=args.final_model, top_k=args.retmax, topic_label=topic_label)
+    scoring_model, final_model = resolve_model_selection(
+        api_key=api_key,
+        scoring_model=args.model,
+        final_model=args.final_model,
+    )
+    records = analyze_papers(papers, api_key=api_key, model=scoring_model, topic_label=topic_label)
+    final_records = rerank_records(records, api_key=api_key, model=final_model, top_k=args.retmax, topic_label=topic_label)
     markdown_path, json_path = write_outputs(
         final_records,
         query=resolved_query,
@@ -1384,8 +1441,8 @@ def main() -> int:
         days_back=args.days_back,
         journal_whitelist_path=str(journal_whitelist_path) if journal_whitelist_path else None,
         search_metadata=search_metadata,
-        scoring_model=args.model,
-        final_model=args.final_model,
+        scoring_model=scoring_model,
+        final_model=final_model,
     )
 
     if args.mark_seen_on_error:

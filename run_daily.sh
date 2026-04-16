@@ -22,8 +22,6 @@ if [[ -n "$TOPIC_FILE" ]]; then
     --topic-file "$TOPIC_FILE" \
     --candidate-pool-size 100 \
     --retmax 10 \
-    --model gpt-5.4-mini \
-    --final-model gpt-5.4 \
     --journal-whitelist "$WHITELIST"
 else
   "$PYTHON" "$ROOT/pubmed_digest.py" \
@@ -31,8 +29,6 @@ else
     --topic "$TOPIC" \
     --candidate-pool-size 100 \
     --retmax 10 \
-    --model gpt-5.4-mini \
-    --final-model gpt-5.4 \
     --journal-whitelist "$WHITELIST"
 fi
 

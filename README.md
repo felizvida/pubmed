@@ -4,7 +4,7 @@
 
 Daily, journal-aware discovery and ranking of recent PubMed, bioRxiv, and arXiv papers on your chosen AI-related research topic.
 
-This project builds a candidate pool from reputable journals, expands to `MEDLINE[sb]` only if needed, then reaches into bioRxiv and the arXiv computer science archive if the pool is still short. By default it uses a 3-day window across all sources, scores the full candidate pool with topic-aware ranking, applies a stronger final reranking pass, and produces a polished reading list plus editor's picks.
+This project builds a candidate pool from reputable journals, expands to `MEDLINE[sb]` only if needed, then reaches into bioRxiv and the arXiv computer science archive if the pool is still short. By default it uses a 3-day window across all sources, scores the full candidate pool with topic-aware ranking, queries your available OpenAI models, prefers the flagship model for the strongest pass and a lighter model for cheaper passes, and produces a polished reading list plus editor's picks.
 
 > A tasteful daily radar for serious AI literature scanning.
 
@@ -13,7 +13,7 @@ This project builds a candidate pool from reputable journals, expands to `MEDLIN
 - Finds newly added PubMed papers using the article `edat` window.
 - Uses a staged candidate ladder: whitelisted journals first, then `MEDLINE[sb]` up to 50 total, then bioRxiv up to 80 total, then arXiv `cs` up to 100 total.
 - Scores the full candidate pool with OpenAI across topic relevance, impact, rigor, interestingness, `awe_factor`, and `surprise_factor`.
-- Uses a stronger second OpenAI pass to rerank the final shortlist.
+- Queries your available OpenAI models and chooses a flagship model for final ranking plus a lighter model for cheaper scoring by default.
 - Keeps non-LLM topics on-track with topic-aware filtering and editor picks.
 - Produces editor's picks for:
   - theoretical contribution
@@ -146,8 +146,6 @@ python pubmed_digest.py \
   --topic llm \
   --candidate-pool-size 100 \
   --retmax 10 \
-  --model gpt-5.4-mini \
-  --final-model gpt-5.4 \
   --journal-whitelist journal_whitelist_top40.txt
 ```
 
@@ -165,8 +163,8 @@ python editor_picks_from_pool.py
 - `--days-back`: search N recent days across PubMed, bioRxiv, and arXiv; default is `PUBMED_DAYS_BACK` or `3`
 - `--candidate-pool-size`: build up to this many candidates before ranking
 - `--retmax`: number of final reranked papers to include in the digest
-- `--model`: fast first-pass scoring model for the full pool; default is `gpt-5.4-mini`
-- `--final-model`: stronger editorial reranking model for the shortlist
+- `--model`: first-pass scoring model for the full pool; if unset, the script queries available models and prefers `gpt-5.4-mini`
+- `--final-model`: stronger editorial reranking model for the shortlist; if unset, the script queries available models and prefers `gpt-5.4`
 - `--journal-whitelist`: newline-delimited whitelist file
 - `--full-text-char-limit`: trim long PMC full text before sending to the model
 - `--mark-seen-without-scoring`: persist PMIDs even when no OpenAI key is set
@@ -200,4 +198,5 @@ That runs every day at 7:00 AM in the machine's local time zone.
 - PubMed does not guarantee full paper text for every record. The pipeline uses PMC full text when available and falls back to abstract-only ranking otherwise.
 - Topic presets are designed to be easy to switch, but you can always tighten them further with `--topic-file` or `--query` for a narrower domain.
 - The preprint stages are opportunistic. If bioRxiv or arXiv rate-limit a run, the pipeline continues instead of failing the entire digest.
+- If `OPENAI_MODEL` and `OPENAI_FINAL_MODEL` are unset, the code asks OpenAI which models are available and picks a sensible default pair instead of assuming fixed names.
 - Secrets stay local in `.env`; generated outputs and local state are ignored by git.
