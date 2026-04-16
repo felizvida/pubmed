@@ -53,6 +53,8 @@ DEFAULT_QUERY = textwrap.dedent(
 ).strip()
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
+DEFAULT_FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL", "gpt-5.4")
+DEFAULT_DAYS_BACK = 3
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
@@ -163,6 +165,15 @@ def daily_output_dir(now: dt.datetime | None = None) -> Path:
     path = OUTPUT_DIR / current.strftime("%Y-%m-%d")
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def display_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 def load_journal_whitelist(path: Path) -> set[str]:
@@ -528,7 +539,6 @@ def fetch_new_papers(
         return [], search_metadata
 
     pubmed_pmids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("pubmed:")]
-    arxiv_ids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("arxiv:")]
     summaries = fetch_summaries(pubmed_pmids)
     arxiv_entries = fetch_arxiv_entry_map(days_back, max(candidate_pool_size * 3, 100))
     if journal_whitelist:
@@ -547,7 +557,7 @@ def fetch_new_papers(
         candidate_ids = filtered_candidates
 
     papers = []
-    for candidate_id in candidate_ids[:retmax]:
+    for candidate_id in candidate_ids:
         if candidate_id.startswith("pubmed:"):
             pmid = candidate_id.split(":", 1)[1]
             summary = summaries.get(pmid)
@@ -706,17 +716,82 @@ def analyze_papers(papers: list[Paper], api_key: str | None, model: str) -> list
     return results
 
 
+def rerank_records(records: list[dict[str, Any]], api_key: str | None, model: str, top_k: int) -> list[dict[str, Any]]:
+    if not api_key or not records:
+        return records[:top_k]
+
+    compact_records = []
+    for record in records:
+        paper = record["paper"]
+        analysis = record["analysis"]
+        compact_records.append(
+            {
+                "paper_id": paper["paper_id"],
+                "source_db": paper["source_db"],
+                "title": paper["title"],
+                "journal": paper["journal"],
+                "pubdate": paper["pubdate"],
+                "scores": {
+                    "overall": analysis.get("overall_recommendation_score"),
+                    "impact": analysis.get("impact_score"),
+                    "interestingness": analysis.get("interestingness_score"),
+                    "awe": analysis.get("awe_factor"),
+                    "surprise": analysis.get("surprise_factor"),
+                    "rigor": analysis.get("rigor_score"),
+                    "relevance": analysis.get("llm_relevance"),
+                },
+                "summary": analysis.get("one_paragraph_summary", ""),
+                "why_it_matters": analysis.get("why_it_matters", [])[:3],
+                "concerns": analysis.get("concerns", [])[:3],
+            }
+        )
+
+    client = OpenAI(api_key=api_key)
+    instructions = textwrap.dedent(
+        """
+        You are producing the final editorial ranking for a daily AI research digest.
+        Return exactly one JSON object and no markdown.
+
+        Prioritize work a human expert should read first, balancing rigor, practical impact,
+        conceptual importance, novelty, surprise, and likely lasting value.
+
+        Required schema:
+        {
+          "ordered_ids": ["paper_id_1", "paper_id_2", "..."]
+        }
+        """
+    ).strip()
+    response = client.responses.create(
+        model=model,
+        reasoning={"effort": "medium"},
+        instructions=instructions,
+        input=json.dumps({"top_k": top_k, "records": compact_records}, ensure_ascii=True),
+    )
+    text = getattr(response, "output_text", "") or extract_response_text(response.model_dump())
+    payload = extract_json_object(text)
+    ordered_ids = payload.get("ordered_ids", [])
+    lookup = {record["paper"]["paper_id"]: record for record in records}
+    reranked = [lookup[paper_id] for paper_id in ordered_ids if paper_id in lookup]
+    seen = {record["paper"]["paper_id"] for record in reranked}
+    reranked.extend(record for record in records if record["paper"]["paper_id"] not in seen)
+    return reranked[:top_k]
+
+
 def write_outputs(
     records: list[dict[str, Any]],
     query: str,
     days_back: int,
     journal_whitelist_path: str | None = None,
     search_metadata: dict[str, Any] | None = None,
+    scoring_model: str | None = None,
+    final_model: str | None = None,
 ) -> tuple[Path, Path]:
     now = dt.datetime.now()
     run_dir = daily_output_dir(now)
     markdown_path = run_dir / "digest.md"
     json_path = run_dir / "digest.json"
+
+    display_whitelist_path = display_path(Path(journal_whitelist_path)) if journal_whitelist_path else None
 
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(
@@ -724,8 +799,10 @@ def write_outputs(
                 "generated_at": now.astimezone(dt.timezone.utc).isoformat(),
                 "days_back": days_back,
                 "query": query,
-                "journal_whitelist_path": journal_whitelist_path,
+                "journal_whitelist_path": display_whitelist_path,
                 "search_metadata": search_metadata,
+                "scoring_model": scoring_model,
+                "final_model": final_model,
                 "records": records,
             },
             handle,
@@ -737,8 +814,11 @@ def write_outputs(
         "",
         f"- Query window: last {days_back} day(s)",
         f"- Papers found: {len(records)}",
-        f"- Journal whitelist: {journal_whitelist_path}" if journal_whitelist_path else "- Journal whitelist: none",
+        f"- Journal whitelist: {display_whitelist_path}" if display_whitelist_path else "- Journal whitelist: none",
         f"- Candidate pool target: {search_metadata.get('candidate_pool_size')}" if search_metadata else "- Candidate pool target: n/a",
+        f"- Candidates scored: {search_metadata.get('papers_fetched')}" if search_metadata else "- Candidates scored: n/a",
+        f"- Scoring model: {scoring_model}" if scoring_model else "- Scoring model: n/a",
+        f"- Final ranking model: {final_model}" if final_model else "- Final ranking model: n/a",
         "",
         "## Recommended Reading",
         "",
@@ -816,7 +896,12 @@ def mark_seen(conn: sqlite3.Connection, records: list[dict[str, Any]], digest_pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--days-back", type=int, default=1, help="Search the last N days of PubMed additions.")
+    parser.add_argument(
+        "--days-back",
+        type=int,
+        default=DEFAULT_DAYS_BACK,
+        help="Search the last N days of PubMed/arXiv additions.",
+    )
     parser.add_argument("--retmax", type=int, default=25, help="Maximum number of PubMed hits to inspect per run.")
     parser.add_argument(
         "--query",
@@ -829,7 +914,8 @@ def parse_args() -> argparse.Namespace:
         default=120000,
         help="Maximum number of full-text characters to send to the LLM.",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenAI model for scoring.")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenAI model for first-pass scoring.")
+    parser.add_argument("--final-model", default=DEFAULT_FINAL_MODEL, help="Stronger OpenAI model for final ranking.")
     parser.add_argument(
         "--candidate-pool-size",
         type=int,
@@ -875,17 +961,20 @@ def main() -> int:
 
     api_key = os.getenv("OPENAI_API_KEY")
     records = analyze_papers(papers, api_key=api_key, model=args.model)
+    final_records = rerank_records(records, api_key=api_key, model=args.final_model, top_k=args.retmax)
     markdown_path, json_path = write_outputs(
-        records,
+        final_records,
         query=args.query,
         days_back=args.days_back,
         journal_whitelist_path=str(journal_whitelist_path) if journal_whitelist_path else None,
         search_metadata=search_metadata,
+        scoring_model=args.model,
+        final_model=args.final_model,
     )
 
     if args.mark_seen_on_error:
         now = dt.datetime.now(dt.timezone.utc).isoformat()
-        rows = [(record["paper"]["seen_key"], now, str(markdown_path)) for record in records]
+        rows = [(record["paper"]["seen_key"], now, str(markdown_path)) for record in final_records]
         conn.executemany(
             """
             INSERT INTO seen_papers (pmid, first_seen_at, last_digest_path)
@@ -896,7 +985,7 @@ def main() -> int:
         )
         conn.commit()
     elif api_key or args.mark_seen_without_scoring:
-        mark_seen(conn, records, markdown_path)
+        mark_seen(conn, final_records, markdown_path)
 
     print(f"Wrote Markdown digest to {markdown_path}")
     print(f"Wrote JSON export to {json_path}")

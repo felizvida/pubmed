@@ -9,6 +9,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from pubmed_digest import (
+    DEFAULT_DAYS_BACK,
     build_candidate_pmids,
     daily_output_dir,
     extract_json_object,
@@ -18,12 +19,15 @@ from pubmed_digest import (
     fetch_summaries,
     init_db,
     load_dotenv,
+    paper_from_arxiv_entry,
+    paper_from_summary,
     parse_abstract,
 )
 
 
 ROOT = Path(__file__).resolve().parent
 WHITELIST = ROOT / "journal_whitelist_top40.txt"
+FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL", "gpt-5.4")
 
 
 def main() -> int:
@@ -53,13 +57,13 @@ def main() -> int:
     candidate_ids, metadata = build_candidate_pmids(
         conn=conn,
         query=query,
-        days_back=365,
+        days_back=DEFAULT_DAYS_BACK,
         candidate_pool_size=100,
         journal_whitelist_path=WHITELIST,
     )
     pubmed_ids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("pubmed:")]
     summaries = fetch_summaries(pubmed_ids)
-    arxiv_entries = fetch_arxiv_entry_map(days_back=365, retmax=300)
+    arxiv_entries = fetch_arxiv_entry_map(days_back=DEFAULT_DAYS_BACK, retmax=300)
 
     pool = []
     for candidate_id in candidate_ids:
@@ -68,25 +72,46 @@ def main() -> int:
             summary = summaries.get(pmid)
             if not summary:
                 continue
-            journal = summary.get("fulljournalname", summary.get("source", "")).strip()
-            title = summary.get("title", "").strip()
-            pubdate = summary.get("pubdate", "").strip()
-            authors = [author.get("name", "").strip() for author in summary.get("authors", []) if author.get("name")]
             try:
-                abstract = parse_abstract(fetch_pubmed_article_xml(pmid))
+                paper = paper_from_summary(pmid, summary, full_text_limit=12000)
             except Exception:
-                abstract = ""
+                try:
+                    abstract = parse_abstract(fetch_pubmed_article_xml(pmid))
+                except Exception:
+                    abstract = ""
+                journal = summary.get("fulljournalname", summary.get("source", "")).strip()
+                title = summary.get("title", "").strip()
+                pubdate = summary.get("pubdate", "").strip()
+                authors = [author.get("name", "").strip() for author in summary.get("authors", []) if author.get("name")]
+                pool.append(
+                    {
+                        "paper_id": pmid,
+                        "source_db": "pubmed",
+                        "title": title,
+                        "journal": journal,
+                        "pubdate": pubdate,
+                        "authors": authors[:6],
+                        "abstract": abstract[:5000],
+                        "content_excerpt": abstract[:6000],
+                        "content_source": "abstract_only",
+                        "entry_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                        "link_label": "PubMed",
+                    }
+                )
+                continue
             pool.append(
                 {
-                    "paper_id": pmid,
-                    "source_db": "pubmed",
-                    "title": title,
-                    "journal": journal,
-                    "pubdate": pubdate,
-                    "authors": authors[:6],
-                    "abstract": abstract[:2000],
-                    "entry_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                    "link_label": "PubMed",
+                    "paper_id": paper.paper_id,
+                    "source_db": paper.source_db,
+                    "title": paper.title,
+                    "journal": paper.journal,
+                    "pubdate": paper.pubdate,
+                    "authors": paper.authors[:6],
+                    "abstract": paper.abstract[:5000],
+                    "content_excerpt": (paper.full_text or paper.abstract)[:6000],
+                    "content_source": paper.source,
+                    "entry_url": paper.entry_url,
+                    "link_label": paper.link_label,
                 }
             )
         else:
@@ -94,17 +119,20 @@ def main() -> int:
             entry = arxiv_entries.get(arxiv_id)
             if not entry:
                 continue
+            paper = paper_from_arxiv_entry(entry)
             pool.append(
                 {
-                    "paper_id": arxiv_id,
-                    "source_db": "arxiv",
-                    "title": entry["title"],
-                    "journal": entry["journal"],
-                    "pubdate": entry["pubdate"],
-                    "authors": entry["authors"][:6],
-                    "abstract": entry["abstract"][:2000],
-                    "entry_url": entry["entry_url"],
-                    "link_label": "arXiv",
+                    "paper_id": paper.paper_id,
+                    "source_db": paper.source_db,
+                    "title": paper.title,
+                    "journal": paper.journal,
+                    "pubdate": paper.pubdate,
+                    "authors": paper.authors[:6],
+                    "abstract": paper.abstract[:5000],
+                    "content_excerpt": paper.abstract[:6000],
+                    "content_source": paper.source,
+                    "entry_url": paper.entry_url,
+                    "link_label": paper.link_label,
                 }
             )
 
@@ -141,8 +169,8 @@ def main() -> int:
     ).strip()
     prompt = "Candidate pool:\n" + json.dumps({"search_metadata": metadata, "papers": pool}, ensure_ascii=True)
     response = client.responses.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-5.4-nano"),
-        reasoning={"effort": "low"},
+        model=FINAL_MODEL,
+        reasoning={"effort": "medium"},
         instructions=instructions,
         input=prompt,
     )
