@@ -31,26 +31,108 @@ from typing import Any
 from openai import OpenAI
 
 
-DEFAULT_QUERY = textwrap.dedent(
-    """
-    (
-      "large language model"[Title/Abstract]
-      OR "large language models"[Title/Abstract]
-      OR LLM[Title/Abstract]
-      OR GPT-4[Title/Abstract]
-      OR GPT-4o[Title/Abstract]
-      OR GPT-5[Title/Abstract]
-      OR "foundation model"[Title/Abstract]
-      OR "foundation models"[Title/Abstract]
-      OR "generative AI"[Title/Abstract]
-      OR "generative artificial intelligence"[Title/Abstract]
-      OR "retrieval augmented generation"[Title/Abstract]
-      OR RAG[Title/Abstract]
-      OR "transformer model"[Title/Abstract]
-      OR "transformer models"[Title/Abstract]
-    )
-    """
-).strip()
+TOPIC_PRESETS: dict[str, str] = {
+    "llm": textwrap.dedent(
+        """
+        (
+          "large language model"[Title/Abstract]
+          OR "large language models"[Title/Abstract]
+          OR LLM[Title/Abstract]
+          OR GPT-4[Title/Abstract]
+          OR GPT-4o[Title/Abstract]
+          OR GPT-5[Title/Abstract]
+          OR "foundation model"[Title/Abstract]
+          OR "foundation models"[Title/Abstract]
+          OR "generative AI"[Title/Abstract]
+          OR "generative artificial intelligence"[Title/Abstract]
+          OR "retrieval augmented generation"[Title/Abstract]
+          OR RAG[Title/Abstract]
+          OR "transformer model"[Title/Abstract]
+          OR "transformer models"[Title/Abstract]
+        )
+        """
+    ).strip(),
+    "bioinformatics": textwrap.dedent(
+        """
+        (
+          bioinformatics[Title/Abstract]
+          OR genomics[Title/Abstract]
+          OR proteomics[Title/Abstract]
+          OR transcriptomics[Title/Abstract]
+          OR "single-cell"[Title/Abstract]
+          OR "computational biology"[Title/Abstract]
+          OR "biological sequence"[Title/Abstract]
+        )
+        AND
+        (
+          "artificial intelligence"[Title/Abstract]
+          OR "machine learning"[Title/Abstract]
+          OR "deep learning"[Title/Abstract]
+          OR "foundation model"[Title/Abstract]
+          OR "large language model"[Title/Abstract]
+        )
+        """
+    ).strip(),
+    "neuroscience": textwrap.dedent(
+        """
+        (
+          neuroscience[Title/Abstract]
+          OR neuroimaging[Title/Abstract]
+          OR MRI[Title/Abstract]
+          OR EEG[Title/Abstract]
+          OR fMRI[Title/Abstract]
+          OR brain[Title/Abstract]
+          OR neuron*[Title/Abstract]
+        )
+        AND
+        (
+          "artificial intelligence"[Title/Abstract]
+          OR "machine learning"[Title/Abstract]
+          OR "deep learning"[Title/Abstract]
+          OR "foundation model"[Title/Abstract]
+          OR "large language model"[Title/Abstract]
+        )
+        """
+    ).strip(),
+    "medical-ai": textwrap.dedent(
+        """
+        (
+          clinic*[Title/Abstract]
+          OR hospital[Title/Abstract]
+          OR patient*[Title/Abstract]
+          OR diagnosis[Title/Abstract]
+          OR radiology[Title/Abstract]
+          OR pathology[Title/Abstract]
+          OR surgery[Title/Abstract]
+        )
+        AND
+        (
+          "artificial intelligence"[Title/Abstract]
+          OR "machine learning"[Title/Abstract]
+          OR "deep learning"[Title/Abstract]
+          OR "foundation model"[Title/Abstract]
+          OR "large language model"[Title/Abstract]
+          OR LLM[Title/Abstract]
+        )
+        """
+    ).strip(),
+    "nlp": textwrap.dedent(
+        """
+        (
+          "natural language processing"[Title/Abstract]
+          OR NLP[Title/Abstract]
+          OR "language model"[Title/Abstract]
+          OR "large language model"[Title/Abstract]
+          OR LLM[Title/Abstract]
+          OR "machine translation"[Title/Abstract]
+          OR summarization[Title/Abstract]
+          OR retrieval[Title/Abstract]
+        )
+        """
+    ).strip(),
+}
+
+DEFAULT_QUERY = TOPIC_PRESETS["llm"]
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 DEFAULT_FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL", "gpt-5.4")
@@ -174,6 +256,21 @@ def display_path(path: Path | None) -> str | None:
         return str(path.resolve().relative_to(ROOT))
     except ValueError:
         return str(path)
+
+
+def available_topics() -> list[str]:
+    return sorted(TOPIC_PRESETS)
+
+
+def resolve_query(topic: str | None, query: str | None, topic_file: Path | None) -> tuple[str, str]:
+    if query:
+        return query, "custom-query"
+    if topic_file:
+        return topic_file.read_text(encoding="utf-8").strip(), f"file:{display_path(topic_file) or topic_file.name}"
+    chosen_topic = topic or os.getenv("PUBMED_TOPIC", "llm")
+    if chosen_topic not in TOPIC_PRESETS:
+        raise ValueError(f"Unknown topic '{chosen_topic}'. Available topics: {', '.join(available_topics())}")
+    return TOPIC_PRESETS[chosen_topic], chosen_topic
 
 
 def load_journal_whitelist(path: Path) -> set[str]:
@@ -780,6 +877,7 @@ def rerank_records(records: list[dict[str, Any]], api_key: str | None, model: st
 def write_outputs(
     records: list[dict[str, Any]],
     query: str,
+    topic_label: str,
     days_back: int,
     journal_whitelist_path: str | None = None,
     search_metadata: dict[str, Any] | None = None,
@@ -798,6 +896,7 @@ def write_outputs(
             {
                 "generated_at": now.astimezone(dt.timezone.utc).isoformat(),
                 "days_back": days_back,
+                "topic": topic_label,
                 "query": query,
                 "journal_whitelist_path": display_whitelist_path,
                 "search_metadata": search_metadata,
@@ -813,6 +912,7 @@ def write_outputs(
         f"# PubMed LLM Digest ({dt.datetime.now().strftime('%Y-%m-%d')})",
         "",
         f"- Query window: last {days_back} day(s)",
+        f"- Topic: {topic_label}",
         f"- Papers found: {len(records)}",
         f"- Journal whitelist: {display_whitelist_path}" if display_whitelist_path else "- Journal whitelist: none",
         f"- Candidate pool target: {search_metadata.get('candidate_pool_size')}" if search_metadata else "- Candidate pool target: n/a",
@@ -904,9 +1004,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--retmax", type=int, default=25, help="Maximum number of PubMed hits to inspect per run.")
     parser.add_argument(
+        "--topic",
+        default=os.getenv("PUBMED_TOPIC", "llm"),
+        choices=available_topics(),
+        help="Named topic preset to search.",
+    )
+    parser.add_argument(
+        "--topic-file",
+        help="Path to a text file containing a custom PubMed query.",
+    )
+    parser.add_argument(
         "--query",
-        default=os.getenv("PUBMED_QUERY", DEFAULT_QUERY),
-        help="PubMed query string. Defaults to an LLM-focused query.",
+        default=os.getenv("PUBMED_QUERY"),
+        help="Custom PubMed query string. Overrides --topic and --topic-file.",
     )
     parser.add_argument(
         "--full-text-char-limit",
@@ -943,11 +1053,17 @@ def main() -> int:
     load_dotenv(ROOT / ".env")
     args = parse_args()
     conn = init_db()
+    topic_file = Path(args.topic_file).expanduser() if args.topic_file else None
+    try:
+        resolved_query, topic_label = resolve_query(args.topic, args.query, topic_file)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     journal_whitelist_path = Path(args.journal_whitelist).expanduser() if args.journal_whitelist else None
     journal_whitelist = load_journal_whitelist(journal_whitelist_path) if journal_whitelist_path else None
     papers, search_metadata = fetch_new_papers(
         conn=conn,
-        query=args.query,
+        query=resolved_query,
         days_back=args.days_back,
         retmax=args.retmax,
         full_text_limit=args.full_text_char_limit,
@@ -964,7 +1080,8 @@ def main() -> int:
     final_records = rerank_records(records, api_key=api_key, model=args.final_model, top_k=args.retmax)
     markdown_path, json_path = write_outputs(
         final_records,
-        query=args.query,
+        query=resolved_query,
+        topic_label=topic_label,
         days_back=args.days_back,
         journal_whitelist_path=str(journal_whitelist_path) if journal_whitelist_path else None,
         search_metadata=search_metadata,

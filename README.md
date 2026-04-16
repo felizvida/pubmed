@@ -50,6 +50,46 @@ Then run the daily workflow:
 
 The scripts automatically load `.env` from the repository root. That file is ignored by git.
 
+## Changing Topics
+
+The easiest way to change topics is with `--topic` or the `TOPIC` environment variable.
+
+Built-in presets:
+
+- `llm`
+- `medical-ai`
+- `bioinformatics`
+- `neuroscience`
+- `nlp`
+
+Examples:
+
+```bash
+python pubmed_digest.py --topic neuroscience
+```
+
+```bash
+TOPIC=bioinformatics ./run_daily.sh
+```
+
+If you want a fully custom search, put your PubMed query in a text file and pass:
+
+```bash
+python pubmed_digest.py --topic-file topics/my_topic.txt
+```
+
+The daily runner supports the same pattern:
+
+```bash
+TOPIC_FILE=topics/spatial_transcriptomics.txt ./run_daily.sh
+```
+
+Or override everything directly:
+
+```bash
+python pubmed_digest.py --query '"spatial transcriptomics"[Title/Abstract] AND "foundation model"[Title/Abstract]'
+```
+
 ## How It Works
 
 1. Search PubMed for recent LLM-related papers over the default 3-day window.
@@ -77,6 +117,7 @@ Run the main digest only:
 ```bash
 python pubmed_digest.py \
   --days-back 3 \
+  --topic llm \
   --candidate-pool-size 100 \
   --retmax 10 \
   --model gpt-5.4-nano \
@@ -93,6 +134,8 @@ python editor_picks_from_pool.py
 ## Important Flags
 
 - `--query`: override the default PubMed query
+- `--topic`: switch to a built-in topic preset
+- `--topic-file`: load a custom query from a text file
 - `--days-back`: search N recent days across PubMed and arXiv; default is `3`
 - `--candidate-pool-size`: build up to this many candidates before ranking
 - `--retmax`: number of final reranked papers to include in the digest

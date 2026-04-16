@@ -22,6 +22,7 @@ from pubmed_digest import (
     paper_from_arxiv_entry,
     paper_from_summary,
     parse_abstract,
+    resolve_query,
 )
 
 
@@ -33,26 +34,8 @@ FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL", "gpt-5.4")
 def main() -> int:
     load_dotenv(ROOT / ".env")
     conn = init_db()
-    query = os.getenv("PUBMED_QUERY") or textwrap.dedent(
-        """
-        (
-          "large language model"[Title/Abstract]
-          OR "large language models"[Title/Abstract]
-          OR LLM[Title/Abstract]
-          OR GPT-4[Title/Abstract]
-          OR GPT-4o[Title/Abstract]
-          OR GPT-5[Title/Abstract]
-          OR "foundation model"[Title/Abstract]
-          OR "foundation models"[Title/Abstract]
-          OR "generative AI"[Title/Abstract]
-          OR "generative artificial intelligence"[Title/Abstract]
-          OR "retrieval augmented generation"[Title/Abstract]
-          OR RAG[Title/Abstract]
-          OR "transformer model"[Title/Abstract]
-          OR "transformer models"[Title/Abstract]
-        )
-        """
-    ).strip()
+    topic_file = Path(os.environ["PUBMED_TOPIC_FILE"]).expanduser() if os.getenv("PUBMED_TOPIC_FILE") else None
+    query, _topic_label = resolve_query(os.getenv("PUBMED_TOPIC", "llm"), os.getenv("PUBMED_QUERY"), topic_file)
 
     candidate_ids, metadata = build_candidate_pmids(
         conn=conn,
