@@ -134,9 +134,11 @@ TOPIC_PRESETS: dict[str, str] = {
 
 DEFAULT_QUERY = TOPIC_PRESETS["llm"]
 
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 DEFAULT_FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL", "gpt-5.4")
-DEFAULT_DAYS_BACK = 3
+DEFAULT_DAYS_BACK = int(os.getenv("PUBMED_DAYS_BACK", "3"))
+MEDLINE_STAGE_TARGET = 50
+BIORXIV_STAGE_TARGET = 80
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
@@ -273,6 +275,172 @@ def resolve_query(topic: str | None, query: str | None, topic_file: Path | None)
     return TOPIC_PRESETS[chosen_topic], chosen_topic
 
 
+TOPIC_MATCH_RULES: dict[str, dict[str, list[str]]] = {
+    "llm": {
+        "core_terms": [
+            "large language model",
+            "large language models",
+            "llm",
+            "foundation model",
+            "foundation models",
+            "generative ai",
+            "gpt-4",
+            "gpt-4o",
+            "gpt-5",
+            "retrieval augmented generation",
+            "rag",
+            "transformer model",
+            "transformer models",
+        ]
+    },
+    "bioinformatics": {
+        "domain_terms": [
+            "bioinformatics",
+            "genomics",
+            "proteomics",
+            "transcriptomics",
+            "single-cell",
+            "computational biology",
+            "biological sequence",
+            "gene expression",
+            "protein structure",
+            "rna-seq",
+            "crispr",
+        ],
+        "method_terms": [
+            "artificial intelligence",
+            "machine learning",
+            "deep learning",
+            "foundation model",
+            "large language model",
+            "neural network",
+        ],
+    },
+    "neuroscience": {
+        "domain_terms": [
+            "neuroscience",
+            "neuroimaging",
+            "mri",
+            "eeg",
+            "fmri",
+            "brain",
+            "neuron",
+            "connectome",
+            "neural activity",
+        ],
+        "method_terms": [
+            "artificial intelligence",
+            "machine learning",
+            "deep learning",
+            "foundation model",
+            "large language model",
+            "neural network",
+        ],
+    },
+    "medical-ai": {
+        "domain_terms": [
+            "clinical",
+            "hospital",
+            "patient",
+            "diagnosis",
+            "radiology",
+            "pathology",
+            "surgery",
+            "electronic health record",
+            "ehr",
+        ],
+        "method_terms": [
+            "artificial intelligence",
+            "machine learning",
+            "deep learning",
+            "foundation model",
+            "large language model",
+            "llm",
+        ],
+    },
+    "nlp": {
+        "core_terms": [
+            "natural language processing",
+            "nlp",
+            "language model",
+            "large language model",
+            "llm",
+            "machine translation",
+            "summarization",
+            "retrieval",
+            "question answering",
+        ]
+    },
+}
+
+
+def extract_query_terms(query: str, max_terms: int = 14) -> list[str]:
+    quoted = [collapse_whitespace(match) for match in re.findall(r'"([^"]+)"', query)]
+    words = [
+        token
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\+\.]{1,}", query)
+        if token.upper() not in {"AND", "OR", "NOT", "TITLE", "ABSTRACT"}
+        and not token.endswith("Abstract")
+    ]
+    terms: list[str] = []
+    for value in quoted + words:
+        normalized = value.strip()
+        if not normalized:
+            continue
+        if normalized.casefold() not in {term.casefold() for term in terms}:
+            terms.append(normalized)
+        if len(terms) >= max_terms:
+            break
+    return terms
+
+
+def topic_terms(topic_label: str, query: str) -> list[str]:
+    rules = TOPIC_MATCH_RULES.get(topic_label)
+    if rules:
+        terms = rules.get("core_terms", []) + rules.get("domain_terms", []) + rules.get("method_terms", [])
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            key = term.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(term)
+        return ordered
+    return extract_query_terms(query)
+
+
+def text_matches_terms(text: str, terms: list[str]) -> bool:
+    haystack = text.casefold()
+    return any(term.casefold() in haystack for term in terms)
+
+
+def topic_description(topic_label: str) -> str:
+    descriptions = {
+        "llm": "large language models, foundation models, generative AI, and closely related language-model research",
+        "bioinformatics": "AI methods applied to bioinformatics, genomics, proteomics, transcriptomics, single-cell biology, or computational biology",
+        "neuroscience": "AI methods applied to neuroscience, neuroimaging, brain data, or neural systems",
+        "medical-ai": "AI methods applied to clinical care, hospital workflows, diagnosis, radiology, pathology, or patient care",
+        "nlp": "natural language processing, language modeling, translation, retrieval, and related language technologies",
+    }
+    return descriptions.get(topic_label, f"research centrally about the topic '{topic_label}'")
+
+
+def text_matches_topic(text: str, topic_label: str, query: str) -> bool:
+    haystack = text.casefold()
+    rules = TOPIC_MATCH_RULES.get(topic_label)
+    if not rules:
+        return text_matches_terms(text, extract_query_terms(query))
+    core_terms = [term.casefold() for term in rules.get("core_terms", [])]
+    if core_terms:
+        return any(term in haystack for term in core_terms)
+    domain_terms = [term.casefold() for term in rules.get("domain_terms", [])]
+    method_terms = [term.casefold() for term in rules.get("method_terms", [])]
+    has_domain = any(term in haystack for term in domain_terms) if domain_terms else True
+    has_method = any(term in haystack for term in method_terms) if method_terms else True
+    return has_domain and has_method
+
+
 def load_journal_whitelist(path: Path) -> set[str]:
     journals = set()
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -323,27 +491,28 @@ def search_pubmed(query: str, days_back: int, retmax: int) -> list[str]:
     return payload.get("esearchresult", {}).get("idlist", [])
 
 
-def build_arxiv_query() -> str:
-    terms = [
-        'all:"large language model"',
-        'all:"large language models"',
-        'all:LLM',
-        'all:"foundation model"',
-        'all:"foundation models"',
-        'all:"generative AI"',
-        'all:"generative artificial intelligence"',
-        'all:"retrieval augmented generation"',
-        'all:RAG',
-        'all:GPT-4',
-        'all:GPT-4o',
-        'all:GPT-5',
-    ]
-    return "(cat:cs.*) AND (" + " OR ".join(terms) + ")"
+def arxiv_clause(terms: list[str]) -> str:
+    parts = []
+    for term in terms:
+        if " " in term or "-" in term or "+" in term:
+            parts.append(f'all:"{term}"')
+        else:
+            parts.append(f"all:{term}")
+    return "(" + " OR ".join(parts) + ")"
 
 
-def search_arxiv_cs(days_back: int, retmax: int) -> list[dict[str, Any]]:
+def build_arxiv_query(topic_label: str, query: str) -> str:
+    rules = TOPIC_MATCH_RULES.get(topic_label)
+    if rules and rules.get("core_terms"):
+        return "(cat:cs.*) AND " + arxiv_clause(rules["core_terms"])
+    if rules and rules.get("domain_terms") and rules.get("method_terms"):
+        return "(cat:cs.*) AND " + arxiv_clause(rules["domain_terms"]) + " AND " + arxiv_clause(rules["method_terms"])
+    return "(cat:cs.*) AND " + arxiv_clause(topic_terms(topic_label, query))
+
+
+def search_arxiv_cs(days_back: int, retmax: int, topic_label: str, query: str) -> list[dict[str, Any]]:
     params = {
-        "search_query": build_arxiv_query(),
+        "search_query": build_arxiv_query(topic_label, query),
         "start": "0",
         "max_results": str(retmax),
         "sortBy": "submittedDate",
@@ -393,8 +562,60 @@ def search_arxiv_cs(days_back: int, retmax: int) -> list[dict[str, Any]]:
     return entries
 
 
-def fetch_arxiv_entry_map(days_back: int, retmax: int) -> dict[str, dict[str, Any]]:
-    return {entry["paper_id"]: entry for entry in search_arxiv_cs(days_back, retmax)}
+def fetch_arxiv_entry_map(days_back: int, retmax: int, topic_label: str, query: str) -> dict[str, dict[str, Any]]:
+    return {entry["paper_id"]: entry for entry in search_arxiv_cs(days_back, retmax, topic_label, query)}
+
+
+def search_biorxiv(days_back: int, retmax: int, topic_label: str, query: str) -> list[dict[str, Any]]:
+    terms = topic_terms(topic_label, query)
+    entries: list[dict[str, Any]] = []
+    cursor = 0
+    interval = f"{days_back}d"
+    while len(entries) < retmax:
+        response = http_get_json(f"https://api.biorxiv.org/details/biorxiv/{interval}/{cursor}/json", {})
+        batch = response.get("collection", [])
+        if not batch:
+            break
+        matched_in_batch = 0
+        for item in batch:
+            title = collapse_whitespace(item.get("title", ""))
+            abstract = collapse_whitespace(item.get("abstract", ""))
+            combined = f"{title}\n{abstract}"
+            if not text_matches_topic(combined, topic_label, query):
+                continue
+            doi = collapse_whitespace(item.get("doi", ""))
+            if not doi:
+                continue
+            version = collapse_whitespace(str(item.get("version", ""))) or "1"
+            category = collapse_whitespace(item.get("category", "")) or "bioRxiv"
+            authors_raw = item.get("authors", "")
+            authors = [collapse_whitespace(name) for name in authors_raw.split(";") if collapse_whitespace(name)]
+            entries.append(
+                {
+                    "paper_id": doi,
+                    "entry_url": f"https://www.biorxiv.org/content/{doi}v{version}",
+                    "title": title,
+                    "abstract": abstract,
+                    "authors": authors,
+                    "pubdate": collapse_whitespace(item.get("date", "")),
+                    "journal": f"bioRxiv: {category}",
+                    "doi": doi,
+                    "pdf_url": f"https://www.biorxiv.org/content/{doi}v{version}.full.pdf",
+                }
+            )
+            matched_in_batch += 1
+            if len(entries) >= retmax:
+                break
+        if len(batch) < 100:
+            break
+        cursor += len(batch)
+        if matched_in_batch == 0 and cursor >= 300:
+            break
+    return entries
+
+
+def fetch_biorxiv_entry_map(days_back: int, retmax: int, topic_label: str, query: str) -> dict[str, dict[str, Any]]:
+    return {entry["paper_id"]: entry for entry in search_biorxiv(days_back, retmax, topic_label, query)}
 
 
 def build_whitelist_journal_query(journal_names: list[str]) -> str:
@@ -405,6 +626,7 @@ def build_whitelist_journal_query(journal_names: list[str]) -> str:
 def build_candidate_pmids(
     conn: sqlite3.Connection,
     query: str,
+    topic_label: str,
     days_back: int,
     candidate_pool_size: int,
     journal_whitelist_path: Path | None,
@@ -413,7 +635,7 @@ def build_candidate_pmids(
     collected: list[str] = []
     seen_pmids = {row[0] for row in conn.execute("SELECT pmid FROM seen_papers")}
 
-    def add_pubmed_stage(stage_name: str, stage_query: str, stage_retmax: int) -> None:
+    def add_pubmed_stage(stage_name: str, stage_query: str, stage_retmax: int, stage_target: int) -> None:
         nonlocal collected
         pmids = search_pubmed(stage_query, days_back, stage_retmax)
         added = 0
@@ -423,7 +645,7 @@ def build_candidate_pmids(
                 continue
             collected.append(seen_key)
             added += 1
-            if len(collected) >= candidate_pool_size:
+            if len(collected) >= stage_target:
                 break
         stages.append(
             {
@@ -437,9 +659,44 @@ def build_candidate_pmids(
             }
         )
 
-    def add_arxiv_stage(stage_name: str, stage_retmax: int) -> None:
+    def add_biorxiv_stage(stage_name: str, stage_retmax: int, stage_target: int) -> None:
         nonlocal collected
-        entries = search_arxiv_cs(days_back, stage_retmax)
+        try:
+            entries = search_biorxiv(days_back, stage_retmax, topic_label, query)
+            stage_error = None
+        except Exception as exc:  # noqa: BLE001
+            entries = []
+            stage_error = str(exc)
+        added = 0
+        for entry in entries:
+            seen_key = f"biorxiv:{entry['paper_id']}"
+            if seen_key in seen_pmids or seen_key in collected:
+                continue
+            collected.append(seen_key)
+            added += 1
+            if len(collected) >= stage_target:
+                break
+        stages.append(
+            {
+                "stage": stage_name,
+                "source": "biorxiv",
+                "retmax": stage_retmax,
+                "query": ", ".join(topic_terms(topic_label, query)),
+                "returned": len(entries),
+                "added": added,
+                "pool_size_after_stage": len(collected),
+                "error": stage_error,
+            }
+        )
+
+    def add_arxiv_stage(stage_name: str, stage_retmax: int, stage_target: int) -> None:
+        nonlocal collected
+        try:
+            entries = search_arxiv_cs(days_back, stage_retmax, topic_label, query)
+            stage_error = None
+        except Exception as exc:  # noqa: BLE001
+            entries = []
+            stage_error = str(exc)
         added = 0
         for entry in entries:
             seen_key = f"arxiv:{entry['paper_id']}"
@@ -447,31 +704,36 @@ def build_candidate_pmids(
                 continue
             collected.append(seen_key)
             added += 1
-            if len(collected) >= candidate_pool_size:
+            if len(collected) >= stage_target:
                 break
         stages.append(
             {
                 "stage": stage_name,
                 "source": "arxiv",
                 "retmax": stage_retmax,
-                "query": build_arxiv_query(),
+                "query": build_arxiv_query(topic_label, query),
                 "returned": len(entries),
                 "added": added,
                 "pool_size_after_stage": len(collected),
+                "error": stage_error,
             }
         )
 
     stage_retmax = max(candidate_pool_size * 3, 100)
+    medline_stage_target = min(candidate_pool_size, MEDLINE_STAGE_TARGET)
+    biorxiv_stage_target = min(candidate_pool_size, BIORXIV_STAGE_TARGET)
     if journal_whitelist_path:
         whitelist_entries = load_journal_whitelist_entries(journal_whitelist_path)
         whitelist_query = build_whitelist_journal_query(whitelist_entries)
-        add_pubmed_stage("journal_whitelist", f"({query}) AND {whitelist_query}", stage_retmax)
-        if len(collected) < candidate_pool_size:
-            add_pubmed_stage("medline_fallback", f"({query}) AND MEDLINE[sb]", stage_retmax)
+        add_pubmed_stage("journal_whitelist", f"({query}) AND {whitelist_query}", stage_retmax, candidate_pool_size)
+        if len(collected) < medline_stage_target:
+            add_pubmed_stage("medline_fallback", f"({query}) AND MEDLINE[sb]", stage_retmax, medline_stage_target)
     else:
-        add_pubmed_stage("default", query, stage_retmax)
+        add_pubmed_stage("default", query, stage_retmax, medline_stage_target)
+    if len(collected) < biorxiv_stage_target:
+        add_biorxiv_stage("biorxiv_fallback", stage_retmax, biorxiv_stage_target)
     if len(collected) < candidate_pool_size:
-        add_arxiv_stage("arxiv_cs_fallback", stage_retmax)
+        add_arxiv_stage("arxiv_cs_fallback", stage_retmax, candidate_pool_size)
 
     return collected[:candidate_pool_size], {"stages": stages, "candidate_pool_size": candidate_pool_size}
 
@@ -615,9 +877,30 @@ def paper_from_arxiv_entry(entry: dict[str, Any]) -> Paper:
     )
 
 
+def paper_from_biorxiv_entry(entry: dict[str, Any]) -> Paper:
+    return Paper(
+        paper_id=entry["paper_id"],
+        source_db="biorxiv",
+        seen_key=f"biorxiv:{entry['paper_id']}",
+        title=entry["title"],
+        authors=entry["authors"],
+        journal=entry["journal"],
+        pubdate=entry["pubdate"],
+        doi=entry.get("doi"),
+        pmcid=None,
+        abstract=entry["abstract"],
+        full_text="",
+        source="abstract_only",
+        entry_url=entry["entry_url"],
+        link_label="bioRxiv",
+        pmc_url=entry.get("pdf_url"),
+    )
+
+
 def fetch_new_papers(
     conn: sqlite3.Connection,
     query: str,
+    topic_label: str,
     days_back: int,
     retmax: int,
     full_text_limit: int,
@@ -628,6 +911,7 @@ def fetch_new_papers(
     candidate_ids, search_metadata = build_candidate_pmids(
         conn=conn,
         query=query,
+        topic_label=topic_label,
         days_back=days_back,
         candidate_pool_size=candidate_pool_size,
         journal_whitelist_path=journal_whitelist_path,
@@ -637,7 +921,8 @@ def fetch_new_papers(
 
     pubmed_pmids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("pubmed:")]
     summaries = fetch_summaries(pubmed_pmids)
-    arxiv_entries = fetch_arxiv_entry_map(days_back, max(candidate_pool_size * 3, 100))
+    biorxiv_entries = fetch_biorxiv_entry_map(days_back, max(candidate_pool_size * 3, 100), topic_label, query)
+    arxiv_entries = fetch_arxiv_entry_map(days_back, max(candidate_pool_size * 3, 100), topic_label, query)
     if journal_whitelist:
         filtered_candidates = []
         for candidate_id in candidate_ids:
@@ -666,10 +951,15 @@ def fetch_new_papers(
             except (urllib.error.URLError, ET.ParseError) as exc:
                 print(f"warning: failed to fetch PMID {pmid}: {exc}", file=sys.stderr)
         else:
-            arxiv_id = candidate_id.split(":", 1)[1]
-            entry = arxiv_entries.get(arxiv_id)
-            if entry:
-                papers.append(paper_from_arxiv_entry(entry))
+            source_db, external_id = candidate_id.split(":", 1)
+            if source_db == "biorxiv":
+                entry = biorxiv_entries.get(external_id)
+                if entry:
+                    papers.append(paper_from_biorxiv_entry(entry))
+            else:
+                entry = arxiv_entries.get(external_id)
+                if entry:
+                    papers.append(paper_from_arxiv_entry(entry))
     search_metadata["papers_fetched"] = len(papers)
     return papers, search_metadata
 
@@ -736,16 +1026,16 @@ def build_analysis_prompt(paper: Paper) -> str:
     ).strip()
 
 
-def analyze_paper(paper: Paper, client: OpenAI, model: str) -> dict[str, Any]:
+def analyze_paper(paper: Paper, client: OpenAI, model: str, topic_label: str) -> dict[str, Any]:
     prompt = build_analysis_prompt(paper)
     instructions = textwrap.dedent(
         """
-        You are scoring biomedical papers for a daily LLM reading digest.
+        You are scoring papers for a daily topic-specific research digest.
         Return exactly one JSON object and no surrounding markdown.
 
         Required schema:
         {
-          "llm_relevance": 0-10 number,
+          "topic_relevance_score": 0-10 number,
           "impact_score": 0-10 number,
           "interestingness_score": 0-10 number,
           "awe_factor": 0-10 number,
@@ -760,13 +1050,17 @@ def analyze_paper(paper: Paper, client: OpenAI, model: str) -> dict[str, Any]:
         }
 
         Scoring guidance:
-        - Prefer practical or scientifically important LLM work.
+        - The chosen topic is: TOPIC_LABEL.
+        - The topic should be interpreted as: TOPIC_DESCRIPTION.
+        - Reward papers that are genuinely central to the chosen topic, not just loosely adjacent.
+        - Penalize generic AI/ML papers that lack a clear, substantial connection to the chosen topic.
         - Reward novelty, study quality, likely influence, and genuinely useful insights.
         - Use awe_factor for work that feels especially impressive, ambitious, elegant, or field-shifting.
         - Use surprise_factor for unexpected findings, unusual applications, counterintuitive results, or clever combinations.
-        - Penalize hype, weak evaluation, vague methods, or marginal relevance to LLMs.
+        - Penalize hype, weak evaluation, vague methods, or only marginal topic relevance.
+        - If a paper is off-topic, topic_relevance_score should be low and overall_recommendation_score should be strongly reduced.
         """
-    ).strip()
+    ).replace("TOPIC_LABEL", topic_label).replace("TOPIC_DESCRIPTION", topic_description(topic_label)).strip()
 
     response = client.responses.create(
         model=model,
@@ -780,7 +1074,7 @@ def analyze_paper(paper: Paper, client: OpenAI, model: str) -> dict[str, Any]:
     return parsed
 
 
-def analyze_papers(papers: list[Paper], api_key: str | None, model: str) -> list[dict[str, Any]]:
+def analyze_papers(papers: list[Paper], api_key: str | None, model: str, topic_label: str) -> list[dict[str, Any]]:
     results = []
     client = OpenAI(api_key=api_key) if api_key else None
     for paper in papers:
@@ -788,10 +1082,11 @@ def analyze_papers(papers: list[Paper], api_key: str | None, model: str) -> list
         if api_key:
             try:
                 assert client is not None
-                analysis = analyze_paper(paper, client, model)
+                analysis = analyze_paper(paper, client, model, topic_label)
             except Exception as exc:  # noqa: BLE001
                 analysis = {
                     "error": str(exc),
+                    "topic_relevance_score": 0,
                     "recommendation_label": "unscored",
                     "overall_recommendation_score": 0,
                     "one_paragraph_summary": "OpenAI scoring failed for this paper.",
@@ -801,6 +1096,7 @@ def analyze_papers(papers: list[Paper], api_key: str | None, model: str) -> list
                 }
         else:
             analysis = {
+                "topic_relevance_score": 0,
                 "recommendation_label": "unscored",
                 "overall_recommendation_score": 0,
                 "one_paragraph_summary": "No OPENAI_API_KEY provided, so this paper was collected but not ranked.",
@@ -813,7 +1109,7 @@ def analyze_papers(papers: list[Paper], api_key: str | None, model: str) -> list
     return results
 
 
-def rerank_records(records: list[dict[str, Any]], api_key: str | None, model: str, top_k: int) -> list[dict[str, Any]]:
+def rerank_records(records: list[dict[str, Any]], api_key: str | None, model: str, top_k: int, topic_label: str) -> list[dict[str, Any]]:
     if not api_key or not records:
         return records[:top_k]
 
@@ -835,7 +1131,7 @@ def rerank_records(records: list[dict[str, Any]], api_key: str | None, model: st
                     "awe": analysis.get("awe_factor"),
                     "surprise": analysis.get("surprise_factor"),
                     "rigor": analysis.get("rigor_score"),
-                    "relevance": analysis.get("llm_relevance"),
+                    "topic_relevance": analysis.get("topic_relevance_score", analysis.get("llm_relevance")),
                 },
                 "summary": analysis.get("one_paragraph_summary", ""),
                 "why_it_matters": analysis.get("why_it_matters", [])[:3],
@@ -846,18 +1142,20 @@ def rerank_records(records: list[dict[str, Any]], api_key: str | None, model: st
     client = OpenAI(api_key=api_key)
     instructions = textwrap.dedent(
         """
-        You are producing the final editorial ranking for a daily AI research digest.
+        You are producing the final editorial ranking for a daily topic-specific research digest.
         Return exactly one JSON object and no markdown.
 
-        Prioritize work a human expert should read first, balancing rigor, practical impact,
-        conceptual importance, novelty, surprise, and likely lasting value.
+        The chosen topic is: TOPIC_LABEL.
+        Prioritize work a human expert should read first, balancing topical centrality, rigor,
+        practical impact, conceptual importance, novelty, surprise, and likely lasting value.
+        Do not rank generic AI papers highly if they are weakly connected to the chosen topic.
 
         Required schema:
         {
           "ordered_ids": ["paper_id_1", "paper_id_2", "..."]
         }
         """
-    ).strip()
+    ).replace("TOPIC_LABEL", topic_label).strip()
     response = client.responses.create(
         model=model,
         reasoning={"effort": "medium"},
@@ -937,7 +1235,7 @@ def write_outputs(
                 f"### {index}. {paper['title']}",
                 "",
                 f"- Score: {score} ({label})",
-                f"- Subscores: impact {analysis.get('impact_score', 'n/a')}/10, interestingness {analysis.get('interestingness_score', 'n/a')}/10, awe {analysis.get('awe_factor', 'n/a')}/10, surprise {analysis.get('surprise_factor', 'n/a')}/10, rigor {analysis.get('rigor_score', 'n/a')}/10, relevance {analysis.get('llm_relevance', 'n/a')}/10",
+                f"- Subscores: impact {analysis.get('impact_score', 'n/a')}/10, interestingness {analysis.get('interestingness_score', 'n/a')}/10, awe {analysis.get('awe_factor', 'n/a')}/10, surprise {analysis.get('surprise_factor', 'n/a')}/10, rigor {analysis.get('rigor_score', 'n/a')}/10, topic relevance {analysis.get('topic_relevance_score', analysis.get('llm_relevance', 'n/a'))}/10",
                 f"- Journal: {paper['journal']}",
                 f"- Date: {paper['pubdate']}",
                 f"- Authors: {authors}",
@@ -1000,7 +1298,7 @@ def parse_args() -> argparse.Namespace:
         "--days-back",
         type=int,
         default=DEFAULT_DAYS_BACK,
-        help="Search the last N days of PubMed/arXiv additions.",
+        help="Search the last N days of PubMed/arXiv additions. Defaults to PUBMED_DAYS_BACK or 3.",
     )
     parser.add_argument("--retmax", type=int, default=25, help="Maximum number of PubMed hits to inspect per run.")
     parser.add_argument(
@@ -1064,6 +1362,7 @@ def main() -> int:
     papers, search_metadata = fetch_new_papers(
         conn=conn,
         query=resolved_query,
+        topic_label=topic_label,
         days_back=args.days_back,
         retmax=args.retmax,
         full_text_limit=args.full_text_char_limit,
@@ -1076,8 +1375,8 @@ def main() -> int:
         return 0
 
     api_key = os.getenv("OPENAI_API_KEY")
-    records = analyze_papers(papers, api_key=api_key, model=args.model)
-    final_records = rerank_records(records, api_key=api_key, model=args.final_model, top_k=args.retmax)
+    records = analyze_papers(papers, api_key=api_key, model=args.model, topic_label=topic_label)
+    final_records = rerank_records(records, api_key=api_key, model=args.final_model, top_k=args.retmax, topic_label=topic_label)
     markdown_path, json_path = write_outputs(
         final_records,
         query=resolved_query,

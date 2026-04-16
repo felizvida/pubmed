@@ -14,15 +14,18 @@ from pubmed_digest import (
     daily_output_dir,
     extract_json_object,
     extract_response_text,
+    fetch_biorxiv_entry_map,
     fetch_arxiv_entry_map,
     fetch_pubmed_article_xml,
     fetch_summaries,
     init_db,
     load_dotenv,
     paper_from_arxiv_entry,
+    paper_from_biorxiv_entry,
     paper_from_summary,
     parse_abstract,
     resolve_query,
+    text_matches_topic,
 )
 
 
@@ -35,18 +38,20 @@ def main() -> int:
     load_dotenv(ROOT / ".env")
     conn = init_db()
     topic_file = Path(os.environ["PUBMED_TOPIC_FILE"]).expanduser() if os.getenv("PUBMED_TOPIC_FILE") else None
-    query, _topic_label = resolve_query(os.getenv("PUBMED_TOPIC", "llm"), os.getenv("PUBMED_QUERY"), topic_file)
+    query, topic_label = resolve_query(os.getenv("PUBMED_TOPIC", "llm"), os.getenv("PUBMED_QUERY"), topic_file)
 
     candidate_ids, metadata = build_candidate_pmids(
         conn=conn,
         query=query,
+        topic_label=topic_label,
         days_back=DEFAULT_DAYS_BACK,
         candidate_pool_size=100,
         journal_whitelist_path=WHITELIST,
     )
     pubmed_ids = [item.split(":", 1)[1] for item in candidate_ids if item.startswith("pubmed:")]
     summaries = fetch_summaries(pubmed_ids)
-    arxiv_entries = fetch_arxiv_entry_map(days_back=DEFAULT_DAYS_BACK, retmax=300)
+    biorxiv_entries = fetch_biorxiv_entry_map(days_back=DEFAULT_DAYS_BACK, retmax=300, topic_label=topic_label, query=query)
+    arxiv_entries = fetch_arxiv_entry_map(days_back=DEFAULT_DAYS_BACK, retmax=300, topic_label=topic_label, query=query)
 
     pool = []
     for candidate_id in candidate_ids:
@@ -98,11 +103,17 @@ def main() -> int:
                 }
             )
         else:
-            arxiv_id = candidate_id.split(":", 1)[1]
-            entry = arxiv_entries.get(arxiv_id)
-            if not entry:
-                continue
-            paper = paper_from_arxiv_entry(entry)
+            source_db, external_id = candidate_id.split(":", 1)
+            if source_db == "biorxiv":
+                entry = biorxiv_entries.get(external_id)
+                if not entry:
+                    continue
+                paper = paper_from_biorxiv_entry(entry)
+            else:
+                entry = arxiv_entries.get(external_id)
+                if not entry:
+                    continue
+                paper = paper_from_arxiv_entry(entry)
             pool.append(
                 {
                     "paper_id": paper.paper_id,
@@ -119,10 +130,18 @@ def main() -> int:
                 }
             )
 
+    filtered_pool = [
+        paper
+        for paper in pool
+        if text_matches_topic(f"{paper.get('title', '')}\n{paper.get('abstract', '')}", topic_label, query)
+    ]
+    if filtered_pool:
+        pool = filtered_pool
+
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     instructions = textwrap.dedent(
         """
-        You are selecting three editor's picks from a candidate pool of LLM-related research papers.
+        You are selecting three editor's picks from a candidate pool of topic-specific research papers.
         Return exactly one JSON object and no markdown.
 
         Required schema:
@@ -145,11 +164,14 @@ def main() -> int:
         }
 
         Category guidance:
+        - The chosen topic is: TOPIC_LABEL.
+        - Only select papers that are genuinely central to the chosen topic.
+        - Do not choose generic AI/ML papers unless the topic connection is explicit and substantial.
         - best_theoretical: strongest conceptual or methodological novelty, scientific depth, benchmark or modeling contribution
         - best_application: highest likely practical value, deployment relevance, workflow or clinical impact
         - most_fun: most delightfully weird, unexpected, charming, or conversation-starting paper while still being legitimate work
         """
-    ).strip()
+    ).replace("TOPIC_LABEL", topic_label).strip()
     prompt = "Candidate pool:\n" + json.dumps({"search_metadata": metadata, "papers": pool}, ensure_ascii=True)
     response = client.responses.create(
         model=FINAL_MODEL,
