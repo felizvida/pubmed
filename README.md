@@ -11,14 +11,16 @@ This project builds a candidate pool from reputable journals, expands to `MEDLIN
 ## Highlights
 
 - Finds newly added PubMed papers using the article `edat` window.
-- Uses a staged candidate ladder: whitelisted journals first, then `MEDLINE[sb]` up to 50 total, then bioRxiv up to 80 total, then arXiv `cs` up to 100 total.
+- Uses a staged candidate ladder with cumulative thresholds: PubMed fills to 50 total, then bioRxiv fills the pool to 80 total, then arXiv `cs` fills the pool to 100 total.
+- Tightens an overfull source within its own lane before selection, so one noisy subgroup does not crowd out the rest of the pool.
 - Scores the full candidate pool with OpenAI across topic relevance, impact, rigor, interestingness, `awe_factor`, and `surprise_factor`.
 - Queries your available OpenAI models and chooses a flagship model for final ranking plus a lighter model for cheaper scoring by default.
 - Keeps non-LLM topics on-track with topic-aware filtering and editor picks.
 - Produces editor's picks for:
-  - theoretical contribution
+  - theoretical research
+  - methods / techniques / algorithmic improvement
   - impactful application
-  - fun / surprising paper
+  - fun / humor / easy read
 - Writes clean daily outputs into `output/YYYY-MM-DD/`.
 - Tracks already-seen PMIDs in SQLite so recurring runs stay incremental.
 
@@ -117,10 +119,10 @@ python post_to_slack.py --date 2026-04-16
 ## How It Works
 
 1. Search PubMed for recent papers matching the chosen topic over the default 3-day window.
-2. Fill a candidate pool from the journal whitelist first.
-3. If the pool is still below 50, search `MEDLINE[sb]`.
-4. If the pool is still below 80, add bioRxiv candidates.
-5. If the pool is still below 100, add arXiv `cs` candidates.
+2. Fill the PubMed lane from the journal whitelist first.
+3. If PubMed is still below 50 total, add `MEDLINE[sb]` results until the PubMed lane reaches 50.
+4. If the combined pool is still below 80 total, add bioRxiv results until the pool reaches 80.
+5. If the combined pool is still below 100 total, add arXiv `cs` results until the pool reaches 100.
 6. Fetch summaries, abstracts, and PMC full text when available.
 7. Score the full candidate pool with a fast OpenAI model using topic-aware relevance.
 8. Rerank the final shortlist with a stronger OpenAI model.
@@ -129,6 +131,9 @@ python post_to_slack.py --date 2026-04-16
    - a full digest
    - a machine-readable JSON export
    - a separate editor's picks summary
+
+Example:
+If whitelisted journals plus `MEDLINE[sb]` only produce 48 papers, bioRxiv can add up to 32 to bring the pool to 80. If the combined PubMed plus bioRxiv pool reaches only 32, arXiv can add up to 68 to bring the pool to 100.
 
 ## Terminal Usage
 
@@ -198,5 +203,6 @@ That runs every day at 7:00 AM in the machine's local time zone.
 - PubMed does not guarantee full paper text for every record. The pipeline uses PMC full text when available and falls back to abstract-only ranking otherwise.
 - Topic presets are designed to be easy to switch, but you can always tighten them further with `--topic-file` or `--query` for a narrower domain.
 - The preprint stages are opportunistic. If bioRxiv or arXiv rate-limit a run, the pipeline continues instead of failing the entire digest.
+- Stage thresholds are cumulative, not fixed per source. A source gets whatever slots remain before the next threshold, and if it returns more than that, the code tightens that source within its own allocation before selection.
 - If `OPENAI_MODEL` and `OPENAI_FINAL_MODEL` are unset, the code asks OpenAI which models are available and picks a sensible default pair instead of assuming fixed names.
 - Secrets stay local in `.env`; generated outputs and local state are ignored by git.

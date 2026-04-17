@@ -26,9 +26,11 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from openai import OpenAI
+
+T = TypeVar("T")
 
 
 TOPIC_PRESETS: dict[str, str] = {
@@ -420,6 +422,7 @@ TOPIC_MATCH_RULES: dict[str, dict[str, list[str]]] = {
 
 def extract_query_terms(query: str, max_terms: int = 14) -> list[str]:
     quoted = [collapse_whitespace(match) for match in re.findall(r'"([^"]+)"', query)]
+    quoted_word_sets = [{part.casefold() for part in phrase.split()} for phrase in quoted]
     words = [
         token
         for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\+\.]{1,}", query)
@@ -431,11 +434,23 @@ def extract_query_terms(query: str, max_terms: int = 14) -> list[str]:
         normalized = value.strip()
         if not normalized:
             continue
+        if value in words and any(normalized.casefold() in word_set for word_set in quoted_word_sets):
+            continue
         if normalized.casefold() not in {term.casefold() for term in terms}:
             terms.append(normalized)
         if len(terms) >= max_terms:
             break
     return terms
+
+
+def extract_query_term_groups(query: str, max_groups: int = 6, max_terms_per_group: int = 12) -> list[list[str]]:
+    group_matches = re.findall(r"\(([^()]+)\)", query)
+    groups: list[list[str]] = []
+    for group_text in group_matches[:max_groups]:
+        terms = extract_query_terms(group_text, max_terms=max_terms_per_group)
+        if terms:
+            groups.append(terms)
+    return groups
 
 
 def topic_terms(topic_label: str, query: str) -> list[str]:
@@ -474,6 +489,9 @@ def text_matches_topic(text: str, topic_label: str, query: str) -> bool:
     haystack = text.casefold()
     rules = TOPIC_MATCH_RULES.get(topic_label)
     if not rules:
+        groups = extract_query_term_groups(query)
+        if groups:
+            return all(any(term.casefold() in haystack for term in group) for group in groups)
         return text_matches_terms(text, extract_query_terms(query))
     core_terms = [term.casefold() for term in rules.get("core_terms", [])]
     if core_terms:
@@ -483,6 +501,61 @@ def text_matches_topic(text: str, topic_label: str, query: str) -> bool:
     has_domain = any(term in haystack for term in domain_terms) if domain_terms else True
     has_method = any(term in haystack for term in method_terms) if method_terms else True
     return has_domain and has_method
+
+
+def topic_match_score(text: str, topic_label: str, query: str) -> int:
+    haystack = text.casefold()
+    rules = TOPIC_MATCH_RULES.get(topic_label)
+    if not rules:
+        groups = extract_query_term_groups(query)
+        if groups:
+            score = 0
+            matched_groups = 0
+            for group in groups:
+                group_hits = sum(1 for term in group if term.casefold() in haystack)
+                if group_hits:
+                    matched_groups += 1
+                    score += 5 + group_hits
+            if matched_groups == len(groups):
+                score += 10
+            return score
+        return sum(1 for term in extract_query_terms(query) if term.casefold() in haystack)
+
+    core_terms = [term.casefold() for term in rules.get("core_terms", [])]
+    if core_terms:
+        hits = sum(1 for term in core_terms if term in haystack)
+        return hits * 3
+
+    domain_terms = [term.casefold() for term in rules.get("domain_terms", [])]
+    method_terms = [term.casefold() for term in rules.get("method_terms", [])]
+    domain_hits = sum(1 for term in domain_terms if term in haystack)
+    method_hits = sum(1 for term in method_terms if term in haystack)
+    score = domain_hits * 3 + method_hits * 2
+    if domain_hits and method_hits:
+        score += 10
+    return score
+
+
+def tighten_scored_items(
+    items: list[T],
+    slots_available: int,
+    text_getter: Callable[[T], str],
+    topic_label: str,
+    query: str,
+) -> tuple[list[T], bool]:
+    if slots_available <= 0:
+        return [], bool(items)
+    if len(items) <= slots_available:
+        return items, False
+
+    scored_items = []
+    for index, item in enumerate(items):
+        text = text_getter(item)
+        scored_items.append((topic_match_score(text, topic_label, query), index, item))
+
+    scored_items.sort(key=lambda row: (-row[0], row[1]))
+    tightened = [item for _, _, item in scored_items[:slots_available]]
+    return tightened, True
 
 
 def load_journal_whitelist(path: Path) -> set[str]:
@@ -611,10 +684,11 @@ def fetch_arxiv_entry_map(days_back: int, retmax: int, topic_label: str, query: 
 
 
 def search_biorxiv(days_back: int, retmax: int, topic_label: str, query: str) -> list[dict[str, Any]]:
-    terms = topic_terms(topic_label, query)
     entries: list[dict[str, Any]] = []
     cursor = 0
-    interval = f"{days_back}d"
+    end_date = dt.date.today()
+    start_date = end_date - dt.timedelta(days=days_back)
+    interval = f"{start_date.isoformat()}/{end_date.isoformat()}"
     while len(entries) < retmax:
         response = http_get_json(f"https://api.biorxiv.org/details/biorxiv/{interval}/{cursor}/json", {})
         batch = response.get("collection", [])
@@ -681,16 +755,34 @@ def build_candidate_pmids(
 
     def add_pubmed_stage(stage_name: str, stage_query: str, stage_retmax: int, stage_target: int) -> None:
         nonlocal collected
+        slots_available = max(0, stage_target - len(collected))
+        if slots_available <= 0:
+            return
         pmids = search_pubmed(stage_query, days_back, stage_retmax)
-        added = 0
+        candidate_pmids = []
         for pmid in pmids:
             seen_key = f"pubmed:{pmid}"
             if seen_key in seen_pmids or seen_key in collected:
                 continue
-            collected.append(seen_key)
-            added += 1
-            if len(collected) >= stage_target:
-                break
+            candidate_pmids.append(pmid)
+
+        summaries = fetch_summaries(candidate_pmids) if len(candidate_pmids) > slots_available else {}
+        tightened_pmids, tightened = tighten_scored_items(
+            candidate_pmids,
+            slots_available,
+            text_getter=lambda pmid: (
+                collapse_whitespace(
+                    f"{summaries.get(pmid, {}).get('title', '')}\n"
+                    f"{summaries.get(pmid, {}).get('fulljournalname', summaries.get(pmid, {}).get('source', ''))}"
+                )
+                if summaries
+                else pmid
+            ),
+            topic_label=topic_label,
+            query=query,
+        )
+        for pmid in tightened_pmids:
+            collected.append(f"pubmed:{pmid}")
         stages.append(
             {
                 "stage": stage_name,
@@ -698,28 +790,39 @@ def build_candidate_pmids(
                 "retmax": stage_retmax,
                 "query": stage_query,
                 "returned": len(pmids),
-                "added": added,
+                "slots_available": slots_available,
+                "added": len(tightened_pmids),
+                "tightened": tightened,
                 "pool_size_after_stage": len(collected),
             }
         )
 
     def add_biorxiv_stage(stage_name: str, stage_retmax: int, stage_target: int) -> None:
         nonlocal collected
+        slots_available = max(0, stage_target - len(collected))
+        if slots_available <= 0:
+            return
         try:
             entries = search_biorxiv(days_back, stage_retmax, topic_label, query)
             stage_error = None
         except Exception as exc:  # noqa: BLE001
             entries = []
             stage_error = str(exc)
-        added = 0
+        candidate_entries = []
         for entry in entries:
             seen_key = f"biorxiv:{entry['paper_id']}"
             if seen_key in seen_pmids or seen_key in collected:
                 continue
-            collected.append(seen_key)
-            added += 1
-            if len(collected) >= stage_target:
-                break
+            candidate_entries.append(entry)
+        tightened_entries, tightened = tighten_scored_items(
+            candidate_entries,
+            slots_available,
+            text_getter=lambda entry: f"{entry.get('title', '')}\n{entry.get('abstract', '')}",
+            topic_label=topic_label,
+            query=query,
+        )
+        for entry in tightened_entries:
+            collected.append(f"biorxiv:{entry['paper_id']}")
         stages.append(
             {
                 "stage": stage_name,
@@ -727,7 +830,9 @@ def build_candidate_pmids(
                 "retmax": stage_retmax,
                 "query": ", ".join(topic_terms(topic_label, query)),
                 "returned": len(entries),
-                "added": added,
+                "slots_available": slots_available,
+                "added": len(tightened_entries),
+                "tightened": tightened,
                 "pool_size_after_stage": len(collected),
                 "error": stage_error,
             }
@@ -735,21 +840,30 @@ def build_candidate_pmids(
 
     def add_arxiv_stage(stage_name: str, stage_retmax: int, stage_target: int) -> None:
         nonlocal collected
+        slots_available = max(0, stage_target - len(collected))
+        if slots_available <= 0:
+            return
         try:
             entries = search_arxiv_cs(days_back, stage_retmax, topic_label, query)
             stage_error = None
         except Exception as exc:  # noqa: BLE001
             entries = []
             stage_error = str(exc)
-        added = 0
+        candidate_entries = []
         for entry in entries:
             seen_key = f"arxiv:{entry['paper_id']}"
             if seen_key in seen_pmids or seen_key in collected:
                 continue
-            collected.append(seen_key)
-            added += 1
-            if len(collected) >= stage_target:
-                break
+            candidate_entries.append(entry)
+        tightened_entries, tightened = tighten_scored_items(
+            candidate_entries,
+            slots_available,
+            text_getter=lambda entry: f"{entry.get('title', '')}\n{entry.get('abstract', '')}",
+            topic_label=topic_label,
+            query=query,
+        )
+        for entry in tightened_entries:
+            collected.append(f"arxiv:{entry['paper_id']}")
         stages.append(
             {
                 "stage": stage_name,
@@ -757,23 +871,25 @@ def build_candidate_pmids(
                 "retmax": stage_retmax,
                 "query": build_arxiv_query(topic_label, query),
                 "returned": len(entries),
-                "added": added,
+                "slots_available": slots_available,
+                "added": len(tightened_entries),
+                "tightened": tightened,
                 "pool_size_after_stage": len(collected),
                 "error": stage_error,
             }
         )
 
     stage_retmax = max(candidate_pool_size * 3, 100)
-    medline_stage_target = min(candidate_pool_size, MEDLINE_STAGE_TARGET)
+    pubmed_stage_target = min(candidate_pool_size, MEDLINE_STAGE_TARGET)
     biorxiv_stage_target = min(candidate_pool_size, BIORXIV_STAGE_TARGET)
     if journal_whitelist_path:
         whitelist_entries = load_journal_whitelist_entries(journal_whitelist_path)
         whitelist_query = build_whitelist_journal_query(whitelist_entries)
-        add_pubmed_stage("journal_whitelist", f"({query}) AND {whitelist_query}", stage_retmax, candidate_pool_size)
-        if len(collected) < medline_stage_target:
-            add_pubmed_stage("medline_fallback", f"({query}) AND MEDLINE[sb]", stage_retmax, medline_stage_target)
+        add_pubmed_stage("journal_whitelist", f"({query}) AND {whitelist_query}", stage_retmax, pubmed_stage_target)
+        if len(collected) < pubmed_stage_target:
+            add_pubmed_stage("medline_fallback", f"({query}) AND MEDLINE[sb]", stage_retmax, pubmed_stage_target)
     else:
-        add_pubmed_stage("default", query, stage_retmax, medline_stage_target)
+        add_pubmed_stage("default", query, stage_retmax, pubmed_stage_target)
     if len(collected) < biorxiv_stage_target:
         add_biorxiv_stage("biorxiv_fallback", stage_retmax, biorxiv_stage_target)
     if len(collected) < candidate_pool_size:

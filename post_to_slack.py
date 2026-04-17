@@ -72,10 +72,12 @@ def build_payload(digest_payload: dict, picks_payload: dict, run_date: str) -> d
     pick_lines = []
     if "best_theoretical" in picks:
         pick_lines.append(format_pick_line("Theory", picks["best_theoretical"], lookup))
+    if "best_methods" in picks:
+        pick_lines.append(format_pick_line("Methods", picks["best_methods"], lookup))
     if "best_application" in picks:
         pick_lines.append(format_pick_line("Application", picks["best_application"], lookup))
     if "most_fun" in picks:
-        pick_lines.append(format_pick_line("Fun", picks["most_fun"], lookup))
+        pick_lines.append(format_pick_line("Fun / Easy Read", picks["most_fun"], lookup))
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": "PubMed Signal", "emoji": True}},

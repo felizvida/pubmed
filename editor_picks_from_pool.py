@@ -147,12 +147,17 @@ def main() -> int:
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     instructions = textwrap.dedent(
         """
-        You are selecting three editor's picks from a candidate pool of topic-specific research papers.
+        You are selecting four editor's picks from a candidate pool of topic-specific research papers.
         Return exactly one JSON object and no markdown.
 
         Required schema:
         {
           "best_theoretical": {
+            "paper_id": "string",
+            "title": "string",
+            "reason": "string"
+          },
+          "best_methods": {
             "paper_id": "string",
             "title": "string",
             "reason": "string"
@@ -173,9 +178,10 @@ def main() -> int:
         - The chosen topic is: TOPIC_LABEL.
         - Only select papers that are genuinely central to the chosen topic.
         - Do not choose generic AI/ML papers unless the topic connection is explicit and substantial.
-        - best_theoretical: strongest conceptual or methodological novelty, scientific depth, benchmark or modeling contribution
-        - best_application: highest likely practical value, deployment relevance, workflow or clinical impact
-        - most_fun: most delightfully weird, unexpected, charming, or conversation-starting paper while still being legitimate work
+        - best_theoretical: strongest conceptual novelty, scientific depth, benchmark contribution, framing, or theory-building value
+        - best_methods: clearest methods, techniques, algorithmic improvement, systems advance, or implementation contribution
+        - best_application: highest likely practical value, deployment relevance, workflow impact, translational value, or real-world usefulness
+        - most_fun: easiest enjoyable read, most charming or delightfully unexpected paper, or the most conversation-starting pick while still being legitimate work
         """
     ).replace("TOPIC_LABEL", topic_label).strip()
     prompt = "Candidate pool:\n" + json.dumps({"search_metadata": metadata, "papers": pool}, ensure_ascii=True)
@@ -202,8 +208,9 @@ def main() -> int:
     ]
     sections = [
         ("Top Theoretical Pick", "best_theoretical"),
+        ("Top Methods / Techniques / Algorithmic Improvement Pick", "best_methods"),
         ("Top Application Pick", "best_application"),
-        ("Top Fun Pick", "most_fun"),
+        ("Top Fun / Humor / Easy Read Pick", "most_fun"),
     ]
     for heading, key in sections:
         pick = picks[key]
