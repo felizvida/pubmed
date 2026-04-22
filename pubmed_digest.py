@@ -1341,6 +1341,7 @@ def write_outputs(
     search_metadata: dict[str, Any] | None = None,
     scoring_model: str | None = None,
     final_model: str | None = None,
+    scored_records: list[dict[str, Any]] | None = None,
 ) -> tuple[Path, Path]:
     now = dt.datetime.now()
     run_dir = daily_output_dir(now)
@@ -1361,6 +1362,7 @@ def write_outputs(
                 "scoring_model": scoring_model,
                 "final_model": final_model,
                 "records": records,
+                "scored_records": scored_records if scored_records is not None else records,
             },
             handle,
             indent=2,
@@ -1552,6 +1554,7 @@ def main() -> int:
     final_records = rerank_records(records, api_key=api_key, model=final_model, top_k=args.retmax, topic_label=topic_label)
     markdown_path, json_path = write_outputs(
         final_records,
+        scored_records=records,
         query=resolved_query,
         topic_label=topic_label,
         days_back=args.days_back,

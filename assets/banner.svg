@@ -46,10 +46,10 @@
     <rect x="880" y="442" width="156" height="10" rx="5" fill="#D7F2EA" fill-opacity="0.75"/>
   </g>
 
-  <text x="128" y="118" fill="#79E2C0" font-family="Avenir, Inter, Arial, sans-serif" font-size="20" font-weight="700" letter-spacing="3.2">DAILY AI RESEARCH SIGNAL</text>
+  <text x="128" y="118" fill="#79E2C0" font-family="Avenir, Inter, Arial, sans-serif" font-size="20" font-weight="700" letter-spacing="3.2">TOPIC-AWARE RESEARCH DIGEST</text>
   <text x="126" y="210" fill="#F8FCFF" font-family="Georgia, 'Times New Roman', serif" font-size="78" font-weight="700">PubMed Signal</text>
-  <text x="130" y="276" fill="#D8EAF1" font-family="Avenir, Inter, Arial, sans-serif" font-size="29" font-weight="500">Find, rank, and summarize the most interesting LLM papers</text>
-  <text x="130" y="316" fill="#D8EAF1" font-family="Avenir, Inter, Arial, sans-serif" font-size="29" font-weight="500">from trusted journals, MEDLINE, and arXiv.</text>
+  <text x="130" y="276" fill="#D8EAF1" font-family="Avenir, Inter, Arial, sans-serif" font-size="29" font-weight="500">Track, rank, and brief AI papers across PubMed,</text>
+  <text x="130" y="316" fill="#D8EAF1" font-family="Avenir, Inter, Arial, sans-serif" font-size="29" font-weight="500">bioRxiv, and arXiv for any research topic.</text>
 
   <g>
     <rect x="130" y="378" width="178" height="42" rx="21" fill="#122C3B" stroke="#2A596F"/>

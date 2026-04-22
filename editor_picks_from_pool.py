@@ -10,6 +10,8 @@ from openai import OpenAI
 
 from pubmed_digest import (
     DEFAULT_DAYS_BACK,
+    Paper,
+    analyze_papers,
     build_candidate_pmids,
     daily_output_dir,
     extract_json_object,
@@ -33,6 +35,81 @@ from pubmed_digest import (
 ROOT = Path(__file__).resolve().parent
 WHITELIST = ROOT / "journal_whitelist_top40.txt"
 FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL")
+
+
+def load_score_lookup(run_dir: Path) -> dict[str, dict]:
+    digest_path = run_dir / "digest.json"
+    if not digest_path.exists():
+        return {}
+    try:
+        payload = json.loads(digest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+    scored_records = payload.get("scored_records") or payload.get("records") or []
+    lookup = {}
+    for record in scored_records:
+        paper = record.get("paper", {})
+        analysis = record.get("analysis", {})
+        paper_id = paper.get("paper_id")
+        if paper_id:
+            lookup[paper_id] = analysis
+    return lookup
+
+
+def paper_from_pool_entry(entry: dict) -> Paper:
+    content = entry.get("content_excerpt", "")
+    abstract = entry.get("abstract", "")
+    if not abstract:
+        abstract = content
+    return Paper(
+        paper_id=entry["paper_id"],
+        source_db=entry.get("source_db", "unknown"),
+        seen_key=f"{entry.get('source_db', 'unknown')}:{entry['paper_id']}",
+        title=entry.get("title", ""),
+        authors=entry.get("authors", []),
+        journal=entry.get("journal", ""),
+        pubdate=entry.get("pubdate", ""),
+        doi=None,
+        pmcid=None,
+        abstract=abstract,
+        full_text=content,
+        source=entry.get("content_source", "abstract_only"),
+        entry_url=entry.get("entry_url", ""),
+        link_label=entry.get("link_label", "Link"),
+        pmc_url=None,
+    )
+
+
+def backfill_pick_scores(
+    picks: dict[str, dict],
+    pool_lookup: dict[str, dict],
+    score_lookup: dict[str, dict],
+    api_key: str | None,
+    scoring_model: str,
+    topic_label: str,
+) -> None:
+    missing_entries = []
+    for pick in picks.values():
+        paper_id = pick.get("paper_id", "")
+        if paper_id in score_lookup:
+            continue
+        entry = pool_lookup.get(paper_id)
+        if entry:
+            missing_entries.append(entry)
+
+    if not missing_entries:
+        return
+
+    scored_records = analyze_papers(
+        [paper_from_pool_entry(entry) for entry in missing_entries],
+        api_key=api_key,
+        model=scoring_model,
+        topic_label=topic_label,
+    )
+    for record in scored_records:
+        paper_id = record["paper"]["paper_id"]
+        score_lookup[paper_id] = record["analysis"]
 
 
 def main() -> int:
@@ -139,12 +216,13 @@ def main() -> int:
     if filtered_pool:
         pool = filtered_pool
 
-    _, final_model = resolve_model_selection(
+    api_key = os.getenv("OPENAI_API_KEY")
+    scoring_model, final_model = resolve_model_selection(
         api_key=os.environ["OPENAI_API_KEY"],
         scoring_model=None,
         final_model=FINAL_MODEL,
     )
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    client = OpenAI(api_key=api_key)
     instructions = textwrap.dedent(
         """
         You are selecting four editor's picks from a candidate pool of topic-specific research papers.
@@ -194,12 +272,21 @@ def main() -> int:
     text = getattr(response, "output_text", "") or extract_response_text(response.model_dump())
     picks = extract_json_object(text)
     run_dir = daily_output_dir()
+    score_lookup = load_score_lookup(run_dir)
+    lookup = {item["paper_id"]: item for item in pool}
+    backfill_pick_scores(picks, lookup, score_lookup, api_key, scoring_model, topic_label)
+    for pick in picks.values():
+        analysis = score_lookup.get(pick.get("paper_id", ""))
+        if not analysis:
+            continue
+        pick["score"] = analysis.get("overall_recommendation_score")
+        pick["recommendation_label"] = analysis.get("recommendation_label")
+        pick["topic_relevance_score"] = analysis.get("topic_relevance_score", analysis.get("llm_relevance"))
     json_path = run_dir / "editor-picks.json"
     md_path = run_dir / "editor-picks.md"
     payload = {"search_metadata": metadata, "pool": pool, "picks": picks}
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    lookup = {item["paper_id"]: item for item in pool}
     lines = [
         "# Editor's Picks",
         "",
@@ -223,6 +310,11 @@ def main() -> int:
                 "",
                 f"**{pick['title']}**",
                 "",
+                f"- Score: {pick['score']} ({pick['recommendation_label']})"
+                if pick.get("score") is not None and pick.get("recommendation_label")
+                else f"- Score: {pick['score']}"
+                if pick.get("score") is not None
+                else "- Score: n/a",
                 f"- Source: {paper.get('source_db', 'unknown')}",
                 f"- {link_label}: [{pick['paper_id']}]({entry_url})" if entry_url else f"- Identifier: {pick['paper_id']}",
                 f"- Journal: {paper.get('journal', 'Unknown')}",

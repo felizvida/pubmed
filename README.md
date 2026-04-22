@@ -2,37 +2,35 @@
 
 ![PubMed Signal banner](assets/banner.svg)
 
-Daily, journal-aware discovery and ranking of recent PubMed, bioRxiv, and arXiv papers on your chosen AI-related research topic.
+Journal-aware daily discovery and ranking for AI-related papers from PubMed, bioRxiv, and arXiv.
 
-This project builds a candidate pool from reputable journals, expands to `MEDLINE[sb]` only if needed, then reaches into bioRxiv and the arXiv computer science archive if the pool is still short. By default it uses a 3-day window across all sources, scores the full candidate pool with topic-aware ranking, queries your available OpenAI models, prefers the flagship model for the strongest pass and a lighter model for cheaper passes, and produces a polished reading list plus editor's picks.
+PubMed Signal is built for people who want a serious daily reading list instead of a noisy firehose. It starts with trusted journals, widens to `MEDLINE[sb]` only when needed, then reaches into bioRxiv and arXiv to fill the pool. It scores the candidate set with OpenAI, reranks the shortlist with a stronger model, and produces both a full digest and a compact set of editor's picks.
 
-> A tasteful daily radar for serious AI literature scanning.
+> A tasteful daily radar for research worth opening first.
 
-## Highlights
+## Why It Feels Different
 
-- Finds newly added PubMed papers using the article `edat` window.
-- Uses a staged candidate ladder with cumulative thresholds: PubMed fills to 50 total, then bioRxiv fills the pool to 80 total, then arXiv `cs` fills the pool to 100 total.
-- Tightens an overfull source within its own lane before selection, so one noisy subgroup does not crowd out the rest of the pool.
-- Scores the full candidate pool with OpenAI across topic relevance, impact, rigor, interestingness, `awe_factor`, and `surprise_factor`.
-- Queries your available OpenAI models and chooses a flagship model for final ranking plus a lighter model for cheaper scoring by default.
-- Keeps non-LLM topics on-track with topic-aware filtering and editor picks.
-- Produces editor's picks for:
+- It is journal-first instead of preprint-first.
+- It uses topic-aware ranking, so `bioinformatics`, `neuroscience`, `medical-ai`, or a custom query do not all get treated like generic LLM news.
+- It keeps source lanes separate, so one noisy feed cannot crowd out the rest of the pool.
+- It writes a digest for humans, JSON for automation, and editor's picks for fast scanning.
+- It can post a polished briefing to Slack when you want delivery built in.
+
+## What You Get
+
+- A staged daily candidate ladder:
+  - PubMed fills to `50`
+  - bioRxiv fills the pool to `80`
+  - arXiv fills the pool to `100`
+- Full-pool scoring with topic relevance, impact, interestingness, rigor, `awe_factor`, and `surprise_factor`
+- Editor's picks for:
   - theoretical research
   - methods / techniques / algorithmic improvement
   - impactful application
   - fun / humor / easy read
-- Writes clean daily outputs into `output/YYYY-MM-DD/`.
-- Tracks already-seen PMIDs in SQLite so recurring runs stay incremental.
-
-## Repository Layout
-
-- `pubmed_digest.py`: main retrieval, scoring, and digest writer
-- `editor_picks_from_pool.py`: editor's-picks selection from the daily candidate pool
-- `run_daily.sh`: one-command daily runner for terminal use
-- `post_to_slack.py`: optional Slack delivery via Incoming Webhook
-- `journal_whitelist_top40.txt`: curated journal whitelist
-- `output/YYYY-MM-DD/`: generated daily Markdown and JSON files
-- `data/pubmed_digest.sqlite3`: local incremental state
+- Per-paper scores in the main digest
+- Per-pick scores in editor's picks
+- Incremental local state, so recurring runs do not keep resurfacing the same papers
 
 ## Quick Start
 
@@ -46,7 +44,7 @@ NCBI_EMAIL="you@example.com"
 EOF
 ```
 
-Then run the daily workflow:
+Run the daily workflow:
 
 ```bash
 ./run_daily.sh
@@ -54,9 +52,50 @@ Then run the daily workflow:
 
 The scripts automatically load `.env` from the repository root. That file is ignored by git.
 
-## Changing Topics
+## Fast Examples
 
-The easiest way to change topics is with `--topic` or the `TOPIC` environment variable.
+Run the default daily workflow:
+
+```bash
+./run_daily.sh
+```
+
+Run a 10-day bioinformatics pass:
+
+```bash
+DAYS_BACK=10 TOPIC=bioinformatics ./run_daily.sh
+```
+
+Run without posting to Slack:
+
+```bash
+POST_TO_SLACK=0 ./run_daily.sh
+```
+
+Run the main digest only:
+
+```bash
+python pubmed_digest.py \
+  --days-back 10 \
+  --topic bioinformatics \
+  --candidate-pool-size 100 \
+  --retmax 10 \
+  --journal-whitelist journal_whitelist_top40.txt
+```
+
+Run editor's picks only:
+
+```bash
+python editor_picks_from_pool.py
+```
+
+Post an existing day to Slack:
+
+```bash
+python post_to_slack.py --date 2026-04-20
+```
+
+## Topics
 
 Built-in presets:
 
@@ -76,117 +115,113 @@ python pubmed_digest.py --topic neuroscience
 TOPIC=bioinformatics ./run_daily.sh
 ```
 
-If you want a fully custom search, put your PubMed query in a text file and pass:
+For a custom topic, put your PubMed query in a text file:
 
 ```bash
-python pubmed_digest.py --topic-file topics/my_topic.txt
-```
-
-The daily runner supports the same pattern:
-
-```bash
-TOPIC_FILE=topics/spatial_transcriptomics.txt ./run_daily.sh
-```
-
-You can also change the default 3-day window without editing code:
-
-```bash
-DAYS_BACK=7 ./run_daily.sh
+python pubmed_digest.py --topic-file topics/spatial_transcriptomics.txt
 ```
 
 or:
 
 ```bash
-PUBMED_DAYS_BACK=7 python pubmed_digest.py --topic bioinformatics
+TOPIC_FILE=topics/spatial_transcriptomics.txt ./run_daily.sh
 ```
 
-Or override everything directly:
+You can also override directly:
 
 ```bash
 python pubmed_digest.py --query '"spatial transcriptomics"[Title/Abstract] AND "foundation model"[Title/Abstract]'
 ```
 
-## Slack Delivery
+## How Selection Works
 
-If `SLACK_WEBHOOK_URL` is present in `.env`, `./run_daily.sh` will post the finished digest to Slack automatically after generating `digest.md` and `editor-picks.md`.
-
-You can also post an existing day's output manually:
-
-```bash
-python post_to_slack.py --date 2026-04-16
-```
-
-## How It Works
-
-1. Search PubMed for recent papers matching the chosen topic over the default 3-day window.
+1. Search PubMed over the chosen window.
 2. Fill the PubMed lane from the journal whitelist first.
-3. If PubMed is still below 50 total, add `MEDLINE[sb]` results until the PubMed lane reaches 50.
-4. If the combined pool is still below 80 total, add bioRxiv results until the pool reaches 80.
-5. If the combined pool is still below 100 total, add arXiv `cs` results until the pool reaches 100.
-6. Fetch summaries, abstracts, and PMC full text when available.
-7. Score the full candidate pool with a fast OpenAI model using topic-aware relevance.
-8. Rerank the final shortlist with a stronger OpenAI model.
-9. Select editor's picks from the same topic-aware pool.
-10. Write:
-   - a full digest
-   - a machine-readable JSON export
-   - a separate editor's picks summary
+3. If PubMed is still below `50`, add `MEDLINE[sb]` until PubMed reaches `50`.
+4. If the combined pool is still below `80`, add bioRxiv until the pool reaches `80`.
+5. If the combined pool is still below `100`, add arXiv `cs` until the pool reaches `100`.
+6. Tighten any overfull source inside its own lane before selection.
+7. Fetch metadata, abstracts, and PMC full text when available.
+8. Score the full candidate pool with a lighter OpenAI model.
+9. Rerank the final shortlist with a stronger OpenAI model.
+10. Select editor's picks from the same topic-aware pool.
 
 Example:
-If whitelisted journals plus `MEDLINE[sb]` only produce 48 papers, bioRxiv can add up to 32 to bring the pool to 80. If the combined PubMed plus bioRxiv pool reaches only 32, arXiv can add up to 68 to bring the pool to 100.
 
-## Terminal Usage
+If PubMed yields `48`, bioRxiv can add up to `32` to bring the pool to `80`. If PubMed plus bioRxiv only reaches `32`, arXiv can add up to `68` to bring the pool to `100`.
 
-Run the full workflow:
+## Scoring
 
-```bash
-./run_daily.sh
-```
+Each paper is scored on:
 
-Run the main digest only:
+- topic relevance
+- impact
+- interestingness
+- rigor
+- awe
+- surprise
 
-```bash
-python pubmed_digest.py \
-  --days-back 3 \
-  --topic llm \
-  --candidate-pool-size 100 \
-  --retmax 10 \
-  --journal-whitelist journal_whitelist_top40.txt
-```
-
-Run editor's picks only:
-
-```bash
-python editor_picks_from_pool.py
-```
-
-## Important Flags
-
-- `--query`: override the default PubMed query
-- `--topic`: switch to a built-in topic preset
-- `--topic-file`: load a custom query from a text file
-- `--days-back`: search N recent days across PubMed, bioRxiv, and arXiv; default is `PUBMED_DAYS_BACK` or `3`
-- `--candidate-pool-size`: build up to this many candidates before ranking
-- `--retmax`: number of final reranked papers to include in the digest
-- `--model`: first-pass scoring model for the full pool; if unset, the script queries available models and prefers `gpt-5.4-mini`
-- `--final-model`: stronger editorial reranking model for the shortlist; if unset, the script queries available models and prefers `gpt-5.4`
-- `--journal-whitelist`: newline-delimited whitelist file
-- `--full-text-char-limit`: trim long PMC full text before sending to the model
-- `--mark-seen-without-scoring`: persist PMIDs even when no OpenAI key is set
-- `--mark-seen-on-error`: persist PMIDs even when OpenAI scoring fails
+By default, the project queries the OpenAI Models API, prefers a lighter model for full-pool scoring, and prefers the flagship model for final editorial reranking if both are available.
 
 ## Output
 
-Each run writes into a date folder:
+Each normal run writes into:
 
 - `output/YYYY-MM-DD/digest.md`
 - `output/YYYY-MM-DD/digest.json`
 - `output/YYYY-MM-DD/editor-picks.md`
 - `output/YYYY-MM-DD/editor-picks.json`
 
-`digest.md` is the main human-readable reading list.  
-`editor-picks.md` is the shorter editorial summary.  
-The JSON files are useful for automation, Slack/email formatting, or downstream tools.
+For ad hoc experimental runs, you can point the scripts at a different output root; those runs are commonly kept outside the main daily folder structure.
+
+`digest.md` is the full reading list.
+`editor-picks.md` is the shorter human-friendly briefing.
+The JSON files are useful for Slack, email, or downstream tooling.
+
+## Slack Delivery
+
+If `SLACK_WEBHOOK_URL` is set in `.env`, `run_daily.sh` can post the finished digest to Slack automatically.
+
+To skip Slack for a given run:
+
+```bash
+POST_TO_SLACK=0 ./run_daily.sh
+```
+
+The Slack post includes:
+
+- a short run summary
+- top ranked papers
+- editor's picks
+- one-line reasons for each pick
+- scores for both the main digest and the picks
+
+## Repository Layout
+
+- `pubmed_digest.py`: retrieval, scoring, reranking, and digest writing
+- `editor_picks_from_pool.py`: editor's-picks selection from the daily candidate pool
+- `post_to_slack.py`: Slack delivery formatter and sender
+- `run_daily.sh`: one-command terminal runner
+- `journal_whitelist_top40.txt`: curated journal whitelist
+- `topics/`: example custom topic files
+- `assets/`: GitHub-facing visuals
+- `output/`: daily outputs
+- `data/pubmed_digest.sqlite3`: local incremental state
+
+## Important Flags
+
+- `--query`: override the default PubMed query
+- `--topic`: switch to a built-in topic preset
+- `--topic-file`: load a custom query from a text file
+- `--days-back`: search N recent days across PubMed, bioRxiv, and arXiv
+- `--candidate-pool-size`: maximum pool size before ranking
+- `--retmax`: number of final reranked papers in the digest
+- `--model`: override the first-pass scoring model
+- `--final-model`: override the final reranking model
+- `--journal-whitelist`: newline-delimited whitelist file
+- `--full-text-char-limit`: trim long PMC full text before scoring
+- `--mark-seen-without-scoring`: persist PMIDs even when no OpenAI key is set
+- `--mark-seen-on-error`: persist PMIDs even when OpenAI scoring fails
 
 ## Scheduling
 
@@ -201,8 +236,6 @@ That runs every day at 7:00 AM in the machine's local time zone.
 ## Notes
 
 - PubMed does not guarantee full paper text for every record. The pipeline uses PMC full text when available and falls back to abstract-only ranking otherwise.
-- Topic presets are designed to be easy to switch, but you can always tighten them further with `--topic-file` or `--query` for a narrower domain.
-- The preprint stages are opportunistic. If bioRxiv or arXiv rate-limit a run, the pipeline continues instead of failing the entire digest.
-- Stage thresholds are cumulative, not fixed per source. A source gets whatever slots remain before the next threshold, and if it returns more than that, the code tightens that source within its own allocation before selection.
-- If `OPENAI_MODEL` and `OPENAI_FINAL_MODEL` are unset, the code asks OpenAI which models are available and picks a sensible default pair instead of assuming fixed names.
+- Topic presets are meant to be easy to switch, but custom topic files are the best way to get very sharp domain-specific behavior.
+- Preprint sources are opportunistic. If bioRxiv or arXiv are slow or flaky, the pipeline continues instead of failing the entire digest.
 - Secrets stay local in `.env`; generated outputs and local state are ignored by git.

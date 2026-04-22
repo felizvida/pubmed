@@ -1,4 +1,5 @@
 .env
 data/
 output/
+output_searches/
 __pycache__/

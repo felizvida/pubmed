@@ -25,12 +25,19 @@ def format_pick_line(label: str, pick: dict, lookup: dict[str, dict]) -> str:
     entry_url = paper.get("entry_url")
     title = pick["title"]
     reason = pick.get("reason", "").strip()
+    score = pick.get("score")
+    recommendation_label = pick.get("recommendation_label")
     if len(reason) > 180:
         reason = reason[:177].rstrip() + "..."
     if entry_url:
         headline = f"*{label}:* <{entry_url}|{title}>"
     else:
         headline = f"*{label}:* {title}"
+    if score is not None:
+        score_text = f"  |  score *{score}*"
+        if recommendation_label:
+            score_text += f" ({recommendation_label})"
+        headline += score_text
     if reason:
         return f"{headline}\n_{reason}_"
     return headline

@@ -7,6 +7,7 @@ WHITELIST="$ROOT/journal_whitelist_top40.txt"
 TOPIC="${TOPIC:-llm}"
 TOPIC_FILE="${TOPIC_FILE:-}"
 DAYS_BACK="${DAYS_BACK:-${PUBMED_DAYS_BACK:-3}}"
+POST_TO_SLACK="${POST_TO_SLACK:-1}"
 
 cd "$ROOT"
 export PUBMED_TOPIC="$TOPIC"
@@ -34,4 +35,10 @@ fi
 
 "$PYTHON" "$ROOT/editor_picks_from_pool.py"
 
-"$PYTHON" "$ROOT/post_to_slack.py"
+case "${POST_TO_SLACK,,}" in
+  0|false|no)
+    ;;
+  *)
+    "$PYTHON" "$ROOT/post_to_slack.py"
+    ;;
+esac
