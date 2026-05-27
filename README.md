@@ -80,7 +80,7 @@ python pubmed_digest.py \
   --topic bioinformatics \
   --candidate-pool-size 100 \
   --retmax 10 \
-  --journal-whitelist journal_whitelist_top40.txt
+  --journal-whitelist journal_whitelist.txt
 ```
 
 Run editor's picks only:
@@ -202,7 +202,7 @@ The Slack post includes:
 - `editor_picks_from_pool.py`: editor's-picks selection from the daily candidate pool
 - `post_to_slack.py`: Slack delivery formatter and sender
 - `run_daily.sh`: one-command terminal runner
-- `journal_whitelist_top40.txt`: curated journal whitelist
+- `journal_whitelist.txt`: curated journal whitelist
 - `topics/`: example custom topic files
 - `assets/`: GitHub-facing visuals
 - `output/`: daily outputs

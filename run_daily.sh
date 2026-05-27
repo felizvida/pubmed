@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python}"
-WHITELIST="$ROOT/journal_whitelist_top40.txt"
+WHITELIST="$ROOT/journal_whitelist.txt"
 TOPIC="${TOPIC:-llm}"
 TOPIC_FILE="${TOPIC_FILE:-}"
 DAYS_BACK="${DAYS_BACK:-${PUBMED_DAYS_BACK:-3}}"
@@ -35,7 +35,9 @@ fi
 
 "$PYTHON" "$ROOT/editor_picks_from_pool.py"
 
-case "${POST_TO_SLACK,,}" in
+POST_TO_SLACK_NORMALIZED="$(printf '%s' "$POST_TO_SLACK" | tr '[:upper:]' '[:lower:]')"
+
+case "$POST_TO_SLACK_NORMALIZED" in
   0|false|no)
     ;;
   *)

@@ -1,7 +1,7 @@
-# Curated 25-journal whitelist for high-reputation PubMed journals
-# with meaningful likelihood of AI / LLM / digital medicine coverage.
+# Curated journal whitelist for higher-reputation venues with meaningful AI coverage.
 # Prefer exact full journal names when matching PubMed metadata.
 
+# General / flagship
 Nature
 Science
 Cell
@@ -10,13 +10,16 @@ Nature biotechnology
 Nature methods
 Nature biomedical engineering
 Nature communications
+Science translational medicine
+Proceedings of the National Academy of Sciences of the United States of America
+Patterns (New York, N.Y.)
+
+# Clinical / digital medicine / medical AI
 npj Digital Medicine
 The New England journal of medicine
 The Lancet
 JAMA
 The Lancet. Digital health
-Science translational medicine
-Proceedings of the National Academy of Sciences of the United States of America
 Cell reports. Medicine
 Med (New York, N.Y.)
 Journal of the American Medical Informatics Association : JAMIA
@@ -24,21 +27,41 @@ Journal of medical Internet research
 Artificial intelligence in medicine
 The BMJ
 JAMA network open
+Journal of biomedical informatics
+
+# Radiology / imaging AI
 Radiology
 Radiology. Artificial intelligence
-Patterns (New York, N.Y.)
+
+# Bioinformatics / computational biology / omics
 Bioinformatics
 Briefings in bioinformatics
 PLoS computational biology
 Nucleic acids research
 Genome biology
+
+# Mass spectrometry / proteomics
+Mass Spectrometry Reviews
+Journal of the American Society for Mass Spectrometry
+Analytical chemistry
+International journal of mass spectrometry
+Rapid communications in mass spectrometry : RCM
+Journal of mass spectrometry : JMS
+Journal of proteome research
+Molecular & cellular proteomics : MCP
+Proteomics
+Clinical mass spectrometry
+Journal of mass spectrometry and advances in the clinical lab
+
+# Neuroscience
 Nature reviews. Neuroscience
 Nature neuroscience
 Neuron
 Brain
 The Journal of neuroscience : the official journal of the Society for Neuroscience
+
+# NLP / language technology
 Computational linguistics
 Transactions of the Association for Computational Linguistics
 Natural language engineering
 Machine translation
-Journal of biomedical informatics

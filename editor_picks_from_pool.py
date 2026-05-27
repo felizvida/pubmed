@@ -33,7 +33,7 @@ from pubmed_digest import (
 
 
 ROOT = Path(__file__).resolve().parent
-WHITELIST = ROOT / "journal_whitelist_top40.txt"
+WHITELIST = ROOT / "journal_whitelist.txt"
 FINAL_MODEL = os.getenv("OPENAI_FINAL_MODEL")
 
 
